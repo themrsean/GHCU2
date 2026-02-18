@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+
+  "rubricItemLibrary": {
+    "ri_commits": {
+      "id": "ri_commits",
+      "name": "Intermediate Commits",
+      "description": "Commits show steady progress over time.",
+      "defaultPoints": 10,
+      "isCheckstyleItem": false
+    },
+    "ri_impl": {
+      "id": "ri_impl",
+      "name": "Code Implementation and Structure",
+      "description": "Correctness, structure, and readability of code.",
+      "defaultPoints": 60,
+      "isCheckstyleItem": false
+    },
+    "ri_tests": {
+      "id": "ri_tests",
+      "name": "Unit Tests",
+      "description": "All required tests pass.",
+      "defaultPoints": 20,
+      "isCheckstyleItem": false
+    },
+    "ri_submit": {
+      "id": "ri_submit",
+      "name": "Submission Requirements",
+      "description": "Meets all submission requirements.",
+      "defaultPoints": 10,
+      "isCheckstyleItem": false
+    },
+    "ri_checkstyle": {
+      "id": "ri_checkstyle",
+      "name": "CheckStyle Errors",
+      "description": "1 point per violation.",
+      "defaultPoints": 10,
+      "isCheckstyleItem": true
+    }
+  },
+
+  "assignments": [
+    {
+      "courseCode": "CSC1120",
+      "assignmentCode": "HW1",
+      "assignmentName": "Homework 1 - Enumerations",
+
+      "expectedFiles": [
+        "src/{studentPackage}/ColorDriver.java",
+        "src/{studentPackage}/Color.java"
+      ],
+
+      "rubric": {
+        "items": [
+          { "rubricItemId": "ri_commits", "points": 10 },
+          { "rubricItemId": "ri_impl", "points": 60 },
+          { "rubricItemId": "ri_tests", "points": 20 },
+          { "rubricItemId": "ri_submit", "points": 10 },
+          { "rubricItemId": "ri_checkstyle", "points": -10 }
+        ]
+      }
+    }
+  ]
+}

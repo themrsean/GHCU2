@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.geometry.Insets?>
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+
+<BorderPane xmlns="http://javafx.com/javafx"
+            xmlns:fx="http://javafx.com/fxml"
+            fx:controller="ui.RemoveCommentPickerController">
+
+    <top>
+        <VBox spacing="6">
+            <padding>
+                <Insets top="10" right="10" bottom="10" left="10"/>
+            </padding>
+
+            <Label text="Remove a comment from this report:" style="-fx-font-size: 14px; -fx-font-weight: bold;"/>
+            <TextField fx:id="searchField" promptText="Search injected comments..."/>
+        </VBox>
+    </top>
+
+    <center>
+        <SplitPane dividerPositions="0.45">
+            <ListView fx:id="commentList"/>
+            <TextArea fx:id="previewArea" editable="false" wrapText="true"/>
+        </SplitPane>
+    </center>
+
+    <bottom>
+        <HBox spacing="10" alignment="CENTER_RIGHT">
+            <padding>
+                <Insets top="10" right="10" bottom="10" left="10"/>
+            </padding>
+
+            <Label fx:id="errorLabel" style="-fx-text-fill: red;"/>
+            <Pane HBox.hgrow="ALWAYS"/>
+
+            <Button text="Cancel" onAction="#onCancel"/>
+            <Button text="Remove" onAction="#onRemove"/>
+        </HBox>
+    </bottom>
+</BorderPane>

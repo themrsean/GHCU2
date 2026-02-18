@@ -1,0 +1,47 @@
+/* Base editor */
+.code-area {
+    -fx-font-family: "JetBrains Mono", "Consolas", monospace;
+    -fx-font-size: 13px;
+}
+
+/* Keywords (public, class, if, etc.) */
+.kw {
+    -fx-fill: #0000FF;
+    -fx-font-weight: bold;
+}
+
+/* Strings */
+.str {
+    -fx-fill: #008000;
+}
+
+/* Character literals */
+.chr {
+    -fx-fill: #008000;
+}
+
+/* Comments */
+.cmt {
+    -fx-fill: #808080;
+    -fx-font-style: italic;
+}
+
+/* Parentheses */
+.paren {
+    -fx-fill: #000000;
+}
+
+/* Braces */
+.brace {
+    -fx-fill: #000000;
+}
+
+/* Brackets */
+.bracket {
+    -fx-fill: #000000;
+}
+
+/* Semicolons */
+.semi {
+    -fx-fill: #000000;
+}

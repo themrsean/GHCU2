@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+
+<?import javafx.geometry.Insets?>
+<BorderPane xmlns="http://javafx.com/javafx"
+            xmlns:fx="http://javafx.com/fxml"
+            fx:controller="ui.CommentManagerController">
+    <left>
+        <TextField fx:id="searchField"
+                   promptText="Search comments..."
+                   prefWidth="250"/>
+
+        <ListView fx:id="commentList" prefWidth="250"/>
+    </left>
+    <center>
+        <VBox spacing="8">
+            <padding>
+                <Insets top="10" right="10" bottom="10" left="10"/>
+            </padding>
+            <TextField fx:id="idField" promptText="Comment ID"/>
+            <TextField fx:id="titleField" promptText="Title"/>
+            <ComboBox fx:id="rubricCombo" promptText="Rubric Item"/>
+            <Spinner fx:id="pointsSpinner"/>
+            <TextArea fx:id="bodyArea"/>
+            <HBox spacing="10">
+                <Button text="New" onAction="#onNew"/>
+                <Button text="Save" fx:id="saveButton" onAction="#onSave"/>
+                <Button text="Delete" onAction="#onDelete"/>
+            </HBox>
+        </VBox>
+    </center>
+</BorderPane>
+

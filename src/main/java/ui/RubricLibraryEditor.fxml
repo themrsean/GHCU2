@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+
+<?import javafx.geometry.Insets?>
+<VBox xmlns="http://javafx.com/javafx/22"
+      xmlns:fx="http://javafx.com/fxml/1"
+      fx:controller="ui.RubricLibraryEditorController"
+      spacing="10">
+    <padding>
+        <Insets top="10" right="10" bottom="10" left="10"/>
+    </padding>
+    <Label text="Rubric Item Library"/>
+
+    <TableView fx:id="rubricTable" editable="true" prefHeight="360">
+        <columns>
+            <TableColumn fx:id="idCol" text="ID" prefWidth="220"/>
+            <TableColumn fx:id="nameCol" text="Name" prefWidth="380"/>
+            <TableColumn fx:id="checkstyleCol" text="Checkstyle" prefWidth="120"/>
+        </columns>
+    </TableView>
+
+    <HBox spacing="10">
+        <Button text="Add Item" onAction="#onAdd"/>
+        <Button text="Delete Selected" onAction="#onDeleteSelected"/>
+        <Region HBox.hgrow="ALWAYS"/>
+        <Button text="Close" defaultButton="true" onAction="#onClose"/>
+    </HBox>
+
+    <Label fx:id="errorLabel" textFill="DARKRED" wrapText="true"/>
+
+</VBox>

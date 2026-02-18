@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+
+<VBox xmlns="http://javafx.com/javafx/22"
+      xmlns:fx="http://javafx.com/fxml/1"
+      fx:controller="ui.CommentLibraryEditorController"
+      spacing="10"
+      padding="10">
+
+    <Label fx:id="titleLabel" text="Comment Library"/>
+
+    <TableView fx:id="commentTable" editable="true" prefHeight="420">
+        <columns>
+            <TableColumn fx:id="rubricItemCol" text="Rubric Item" prefWidth="240"/>
+            <TableColumn fx:id="pointsCol" text="Points" prefWidth="90"/>
+            <TableColumn fx:id="titleCol" text="Title" prefWidth="240"/>
+            <TableColumn fx:id="textCol" text="Comment Text" prefWidth="520"/>
+        </columns>
+    </TableView>
+
+    <HBox spacing="10">
+        <Button text="Add Comment" onAction="#onAdd"/>
+        <Button text="Delete Selected" onAction="#onDeleteSelected"/>
+        <Region HBox.hgrow="ALWAYS"/>
+        <Button text="Close" defaultButton="true" onAction="#onClose"/>
+    </HBox>
+
+    <Label fx:id="errorLabel" textFill="DARKRED" wrapText="true"/>
+
+</VBox>

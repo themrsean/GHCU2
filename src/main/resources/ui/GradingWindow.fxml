@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+<?import javafx.geometry.Insets?>
+<?import org.fxmisc.richtext.CodeArea?>
+
+<?import org.fxmisc.flowless.VirtualizedScrollPane?>
+<BorderPane xmlns="http://javafx.com/javafx/22"
+            xmlns:fx="http://javafx.com/fxml/1"
+            fx:controller="ui.GradingWindowController"
+            prefWidth="1200"
+            prefHeight="720">
+    <padding>
+        <Insets top="10" right="10" bottom="10" left="10"/>
+    </padding>
+    <left>
+        <VBox spacing="8" prefWidth="280" BorderPane.alignment="CENTER">
+            <Label text="Submissions"/>
+            <ListView fx:id="studentList" VBox.vgrow="ALWAYS"/>
+            <VBox spacing="10">
+                <HBox spacing="10">
+                    <Button text="Save Drafts" onAction="#onSaveDrafts"/>
+                    <Button text="Export Graded HTML" onAction="#onExportGradedHtml"/>
+                    <Button text="Preview HTML" onAction="#onPreviewDraft"/>
+                </HBox>
+                <HBox>
+                    <Button fx:id="saveAndExportButton" text="Save + Export" defaultButton="true" onAction="#onSaveAndExport"/>
+                    <Button text="Remove Comment..." onAction="#onRemoveComment"/>
+                    <Button text="Manage Comments" onAction="#onManageComments"/>
+                </HBox>
+                <Button text="Close" onAction="#onCloseAndSaveAll"/>
+            </VBox>
+        </VBox>
+    </left>
+    <center>
+        <VBox spacing="8" BorderPane.alignment="CENTER">
+            <HBox spacing="10">
+                <Label text="Report (Markdown)"/>
+                <Button text="Insert Comment..." onAction="#onInsertComment"/>
+                <Button text="Rebuild Summary" onAction="#onRebuildSummary"/>
+                <Region HBox.hgrow="ALWAYS"/>
+                <Label fx:id="statusLabel"/>
+            </HBox>
+            <VirtualizedScrollPane VBox.vgrow="ALWAYS">
+                <content>
+                    <CodeArea fx:id="reportEditor"/>
+                </content>
+            </VirtualizedScrollPane>
+        </VBox>
+    </center>
+</BorderPane>

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+
+<BorderPane xmlns="http://javafx.com/javafx/22"
+            xmlns:fx="http://javafx.com/fxml/1"
+            fx:controller="ui.CommentPickerController"
+            prefWidth="720"
+            prefHeight="520">
+
+    <top>
+        <VBox spacing="8" BorderPane.alignment="CENTER">
+            <HBox spacing="10">
+                <Label text="Comments"/>
+                <Region HBox.hgrow="ALWAYS"/>
+                <TextField fx:id="searchField" promptText="Search..."/>
+            </HBox>
+
+            <Label fx:id="assignmentLabel" text=""/>
+        </VBox>
+    </top>
+
+    <center>
+        <SplitPane dividerPositions="0.45">
+            <VBox spacing="6">
+                <Label text="Available"/>
+                <ListView fx:id="commentList" VBox.vgrow="ALWAYS"/>
+            </VBox>
+
+            <VBox spacing="6">
+                <Label text="Preview"/>
+                <TextArea fx:id="previewArea"
+                          editable="false"
+                          wrapText="true"
+                          VBox.vgrow="ALWAYS"/>
+            </VBox>
+        </SplitPane>
+    </center>
+
+    <bottom>
+        <VBox spacing="6" BorderPane.alignment="CENTER">
+            <Label fx:id="errorLabel" textFill="DARKRED" wrapText="true"/>
+
+            <HBox spacing="10" alignment="CENTER_RIGHT">
+                <Button text="Cancel" onAction="#onCancel"/>
+                <Button fx:id="applyButton" text="Apply" defaultButton="true" onAction="#onApply"/>
+            </HBox>
+        </VBox>
+    </bottom>
+
+</BorderPane>

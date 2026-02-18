@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+
+<?import javafx.geometry.Insets?>
+<VBox xmlns="http://javafx.com/javafx/22"
+      xmlns:fx="http://javafx.com/fxml/1"
+      fx:controller="ui.AssignmentEditorController"
+      spacing="10" >
+    <padding>
+        <Insets top="10" right="10" bottom="10" left="10"/>
+    </padding>
+    <GridPane hgap="10" vgap="8">
+        <columnConstraints>
+            <ColumnConstraints minWidth="120" halignment="RIGHT"/>
+            <ColumnConstraints hgrow="ALWAYS"/>
+        </columnConstraints>
+
+        <Label text="Course Code:" GridPane.rowIndex="0" GridPane.columnIndex="0"/>
+        <TextField fx:id="courseCodeField" GridPane.rowIndex="0" GridPane.columnIndex="1"/>
+
+        <Label text="Assignment Code:" GridPane.rowIndex="1" GridPane.columnIndex="0"/>
+        <TextField fx:id="assignmentCodeField" GridPane.rowIndex="1" GridPane.columnIndex="1"/>
+
+        <Label text="Assignment Name:" GridPane.rowIndex="2" GridPane.columnIndex="0"/>
+        <TextField fx:id="assignmentNameField" GridPane.rowIndex="2" GridPane.columnIndex="1"/>
+    </GridPane>
+
+    <Separator/>
+
+    <Label text="Expected Files (drop files here):"/>
+    <ListView fx:id="expectedFilesListView" prefHeight="140"/>
+
+    <Separator/>
+
+    <Label text="Rubric Items:"/>
+    <TableView fx:id="rubricTable" prefHeight="220">
+        <columns>
+            <TableColumn fx:id="rubricItemIdCol" text="Rubric Item"/>
+            <TableColumn fx:id="pointsCol" text="Points"/>
+        </columns>
+    </TableView>
+
+    <HBox spacing="10">
+        <Button fx:id="addRubricRowButton" text="Add Item" onAction="#onAddRubricRow"/>
+        <Button fx:id="removeRubricRowButton" text="Remove Selected" onAction="#onRemoveRubricRow"/>
+        <Region HBox.hgrow="ALWAYS"/>
+        <Label fx:id="totalLabel" text="Total: 0"/>
+    </HBox>
+
+    <Label fx:id="errorLabel" textFill="DARKRED" wrapText="true"/>
+
+    <HBox spacing="10" alignment="CENTER_RIGHT">
+        <Button text="Cancel" onAction="#onCancel"/>
+        <Button text="Save" defaultButton="true" onAction="#onSave"/>
+    </HBox>
+
+</VBox>

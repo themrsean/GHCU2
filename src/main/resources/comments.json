@@ -1,0 +1,18 @@
+[
+  {
+    "commentId": "c_output_minor",
+    "assignmentKey": "CSC1120HW1",
+    "title": "Slight output differences",
+    "markdownBody": "#### Slight output differences\nThe tests that you failed was due to differences in the output...",
+    "rubricItemId": "ri_tests",
+    "pointsOff": 2
+  },
+  {
+    "commentId": "c_missing_javadoc_enum",
+    "assignmentKey": "CSC1120HW1",
+    "title": "Missing javadoc for enum values",
+    "markdownBody": "#### -10 CheckStyle Errors\n* Missing javadoc comments...",
+    "rubricItemId": "ri_checkstyle",
+    "pointsOff": 10
+  }
+]

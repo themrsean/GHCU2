@@ -1,0 +1,18 @@
+{
+  "courseCode": "CSC1120",
+  "assignmentCode": "HW1",
+  "assignmentName": "Homework 1 - Enumerations",
+  "expectedFiles": [
+    "src/{studentPackage}/ColorDriver.java",
+    "src/{studentPackage}/Color.java"
+  ],
+  "rubric": {
+    "items": [
+      { "rubricItemId": "ri_commits", "points": 10 },
+      { "rubricItemId": "ri_impl", "points": 60 },
+      { "rubricItemId": "ri_tests", "points": 20 },
+      { "rubricItemId": "ri_submit", "points": 10 },
+      { "rubricItemId": "ri_checkstyle", "points": -10 }
+    ]
+  }
+}

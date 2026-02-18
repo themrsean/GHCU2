@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+
+<?import javafx.geometry.Insets?>
+<BorderPane xmlns="http://javafx.com/javafx"
+            xmlns:fx="http://javafx.com/fxml"
+            fx:controller="ui.MainWindowController">
+
+    <!-- ===================== -->
+    <!--        MENU BAR       -->
+    <!-- ===================== -->
+    <top>
+        <MenuBar>
+            <Menu text="File">
+                <MenuItem text="Open Assignments…" onAction="#onImportAssignments"/>
+                <MenuItem fx:id="exportAssignmentsMenuItem" text="Export Assignments…" onAction="#onExportAssignments"/>
+                <MenuItem fx:id="gradeAssignmentMenuItem" text="Grade Assignment..." onAction="#onGradeAssignment"/>
+                <SeparatorMenuItem/>
+                <MenuItem text="Exit" onAction="#onExit"/>
+            </Menu>
+
+            <Menu text="Assignment">
+                <MenuItem text="New Assignment…" onAction="#onNewAssignment"/>
+                <MenuItem fx:id="editAssignmentMenuItem" text="Edit Assignment…" onAction="#onEditAssignment"/>
+                <MenuItem fx:id="deleteAssignmentMenuItem" text="Delete Assignment" onAction="#onDeleteAssignment"/>
+                <MenuItem text="Edit Rubric Library..." onAction="#onEditRubricLibrary"/>
+                <MenuItem text="Edit Comment Library" onAction="#onEditCommentLibrary"/>
+            </Menu>
+
+            <Menu text="Run">
+                <MenuItem fx:id="pullMenuItem" text="Pull Repositories" onAction="#onPull"/>
+                <MenuItem fx:id="extractMenuItem" text="Extract Packages" onAction="#onExtract"/>
+                <MenuItem fx:id="importsMenuItem" text="Generate Imports" onAction="#onGenerateImports"/>
+                <MenuItem fx:id="reportsMenuItem" text="Generate Reports" onAction="#onGenerateReports"/>
+                <SeparatorMenuItem/>
+                <MenuItem fx:id="runAllMenuItem" text="Run All" onAction="#onRunAll"/>
+            </Menu>
+
+            <Menu text="Help">
+                <MenuItem text="Validate GitHub CLI" onAction="#onValidateGh"/>
+                <MenuItem text="About" onAction="#onAbout"/>
+            </Menu>
+        </MenuBar>
+    </top>
+
+    <!-- ===================== -->
+    <!--     MAIN CONTENT      -->
+    <!-- ===================== -->
+    <center>
+        <VBox spacing="10">
+            <padding>
+                <Insets top="10" right="10" bottom="10" left="10"/>
+            </padding>
+            <!-- Clone command -->
+            <HBox spacing="10">
+                <Label text="GitHub Classroom Command:"/>
+                <TextField fx:id="cloneCommandField"
+                           promptText="gh classroom clone student-repos -a 926138"
+                           HBox.hgrow="ALWAYS"/>
+            </HBox>
+
+            <!-- Root path -->
+            <HBox spacing="10">
+                <Label text="Repository Root:"/>
+                <TextField fx:id="rootPathField"
+                           editable="false"
+                           HBox.hgrow="ALWAYS"/>
+                <Button text="Browse…" onAction="#onBrowseRoot"/>
+            </HBox>
+
+            <!-- Assignment + options -->
+            <HBox spacing="20">
+
+                <VBox spacing="5">
+                    <Label text="Assignment:"/>
+                    <ComboBox fx:id="assignmentCombo"
+                              prefWidth="300"/>
+                </VBox>
+
+                <VBox spacing="5">
+                    <CheckBox fx:id="checkstyleCheckBox"
+                              selected="true"
+                              text="Run Checkstyle"/>
+                    <TextField fx:id="checkstyleUrlField"
+                               promptText="Checkstyle config URL"
+                               disable="true"
+                               prefWidth="350"/>
+                </VBox>
+
+            </HBox>
+
+            <!-- Assignment summary -->
+            <TitledPane text="Assignment Summary" collapsible="false">
+                <content>
+                    <VBox fx:id="assignmentSummaryBox" spacing="8">
+                        <Label fx:id="assignmentTitleLabel" text="(no assignment selected)"/>
+                        <HBox spacing="10">
+                            <ListView fx:id="expectedFilesListView" prefHeight="200" HBox.hgrow="ALWAYS"/>
+                            <ListView fx:id="rubricListView" prefHeight="200" HBox.hgrow="ALWAYS"/>
+                        </HBox>
+                    </VBox>
+                </content>
+            </TitledPane>
+
+        </VBox>
+    </center>
+
+    <!-- ===================== -->
+    <!--      PROGRESS LOG     -->
+    <!-- ===================== -->
+    <bottom>
+        <TitledPane text="Progress Log" collapsible="false">
+            <TextArea fx:id="logTextArea"
+                      editable="false"
+                      prefRowCount="8"
+                      style="-fx-font-family: monospace;"/>
+        </TitledPane>
+    </bottom>
+</BorderPane>
