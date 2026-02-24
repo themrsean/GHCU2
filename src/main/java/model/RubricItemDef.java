@@ -1,30 +1,15 @@
-/*
- * Course: CSC-1120
- * ASSIGNMENT
- * FILE
- * Name: Sean Jones
- * Last Updated:
- */
 package model;
 
-/**
- * Rubric item definition stored in the global rubric item library.
- *
- * JSON shape (example):
- * "ri_commits": {
- *   "id": "ri_commits",
- *   "name": "Intermediate Commits",
- *   "description": "...",
- *   "defaultPoints": 10,
- *   "isCheckstyleItem": false
- * }
- */
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 public class RubricItemDef {
     private String id;
     private String name;
     private String description;
     private int defaultPoints;
-    private boolean isCheckstyleItem;
+
+    private boolean checkstyleItem;
 
     public RubricItemDef() {
         // Required for JSON deserialization
@@ -62,11 +47,14 @@ public class RubricItemDef {
         this.defaultPoints = defaultPoints;
     }
 
+    @JsonProperty("isCheckstyleItem")
     public boolean isCheckstyleItem() {
-        return isCheckstyleItem;
+        return checkstyleItem;
     }
 
+    @JsonProperty("isCheckstyleItem")
+    @JsonAlias({"checkstyleItem"})
     public void setCheckstyleItem(boolean checkstyleItem) {
-        isCheckstyleItem = checkstyleItem;
+        this.checkstyleItem = checkstyleItem;
     }
 }
