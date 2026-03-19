@@ -7,8 +7,6 @@
  */
 package ui;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import javafx.application.Platform;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
@@ -31,9 +29,7 @@ import javafx.stage.Stage;
 import model.Assignment;
 import model.AssignmentsFile;
 import model.Comments;
-import model.RubricItemDef;
 import model.RubricItemRef;
-import model.RubricTableBuilder;
 import org.fxmisc.richtext.CodeArea;
 import org.fxmisc.richtext.model.StyleSpans;
 import org.fxmisc.richtext.model.StyleSpansBuilder;
@@ -42,6 +38,10 @@ import model.Comments.CommentsLibrary;
 import model.Comments.CommentsStore;
 import model.Comments.ParsedComment;
 import service.GradingDraftService;
+import service.GradingDraftSessionService;
+import service.GradingMappingsService;
+import service.GradingReportEditorService;
+import service.GradingSyncService;
 import service.ReportHtmlWrapper;
 
 import java.io.IOException;
@@ -52,8 +52,6 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -72,10 +70,6 @@ import java.util.regex.Pattern;
  * - loads the next student's draft + restores caret position
  */
 public class GradingWindowController {
-    private static final String COMMENTS_SUMMARY_BEGIN = "<!-- COMMENTS_SUMMARY_BEGIN -->";
-    private static final String COMMENTS_SUMMARY_END = "<!-- COMMENTS_SUMMARY_END -->";
-    private static final String RUBRIC_TABLE_BEGIN = "<!-- RUBRIC_TABLE_BEGIN -->";
-    private static final String RUBRIC_TABLE_END = "<!-- RUBRIC_TABLE_END -->";
     private static final String COMMENT_ANCHOR_PREFIX = "cmt_";
     // --- Syntax highlighting (Java) ---
     private static final String[] KEYWORDS = new String[] {
@@ -130,6 +124,12 @@ public class GradingWindowController {
     private final ReportHtmlWrapper reportHtmlWrapper = new ReportHtmlWrapper();
     private final GradingDraftService gradingDraftService =
             new GradingDraftService(reportHtmlWrapper);
+    private final GradingMappingsService gradingMappingsService =
+            new GradingMappingsService(this::status);
+    private GradingReportEditorService gradingReportEditorService;
+    private final GradingSyncService gradingSyncService = new GradingSyncService();
+    private final GradingDraftSessionService draftSessionService =
+            new GradingDraftSessionService();
 
     private AssignmentsFile assignmentsFile;
     private Assignment assignment;
@@ -141,14 +141,13 @@ public class GradingWindowController {
     private final ObservableList<String> studentPackages =
             FXCollections.observableArrayList();
 
-    private final Map<String, StudentDraft> drafts = new HashMap<>();
-
     private String currentStudent = null;
     private boolean suppressCaretEvents = false;
     private boolean suppressHighlighting = false;
     private boolean suppressTextListener = false;
     private boolean isLoadingStudent = false;
     private boolean applyingHighlight = false;
+    private boolean saveInProgress = false;
 
     public void init(AssignmentsFile assignmentsFile, Assignment assignment, Path rootPath,
                      Path mappingsPath) {
@@ -159,6 +158,8 @@ public class GradingWindowController {
         this.mappingsPath = mappingsPath;
         // rootPath/packages
         this.assignmentId = assignment.getCourseCode() + assignment.getAssignmentCode();
+        this.gradingReportEditorService =
+                new GradingReportEditorService(assignment, assignmentsFile);
         status("Assignment ID = [" + assignmentId + "]");
         setupUi();
         loadComments();
@@ -186,18 +187,12 @@ public class GradingWindowController {
                 .addListener((_, oldV, newV) -> onStudentSelectionChanged(oldV, newV));
         reportEditor.caretPositionProperty().addListener((_, _, newV) -> {
             if (!suppressCaretEvents && currentStudent != null) {
-                StudentDraft d = drafts.get(currentStudent);
-                if (d != null) {
-                    d.setCaretPosition(newV);
-                }
+                draftSessionService.updateCaretIfPresent(currentStudent, newV);
             }
         });
         reportEditor.textProperty().addListener((_, _, newText) -> {
             if (!suppressTextListener && currentStudent != null) {
-                StudentDraft d = drafts.get(currentStudent);
-                if (d != null) {
-                    d.setMarkdown(newText);
-                }
+                draftSessionService.updateMarkdownIfPresent(currentStudent, newText);
             }
         });
         status("");
@@ -221,25 +216,12 @@ public class GradingWindowController {
 
     private void loadStudentPackages() {
         studentPackages.clear();
-        Path mappingFile = loadOrReconstructMappings();
-        try {
-            ObjectMapper mapper = new ObjectMapper();
-            Map<String, Map<String, String>> mapping =
-                    mapper.readValue(
-                            Files.readAllBytes(Objects.requireNonNull(mappingFile)),
-                            new TypeReference<>() {
-                                // should remain blank
-                            }
-                    );
-            System.out.println("Mapping size = " + mapping.size());
-            List<String> keys = new ArrayList<>(mapping.keySet());
-            keys.sort(String::compareToIgnoreCase);
-            studentPackages.setAll(keys);
-            status("Student package count = " + studentPackages.size());
-            status("Loaded " + keys.size() + " submissions.");
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+        Map<String, String> mapping = loadMappingsForUse();
+        List<String> keys = new ArrayList<>(mapping.keySet());
+        keys.sort(String::compareToIgnoreCase);
+        studentPackages.setAll(keys);
+        status("Student package count = " + studentPackages.size());
+        status("Loaded " + keys.size() + " submissions.");
     }
 
     private void onStudentSelectionChanged(String oldStudent, String newStudent) {
@@ -367,13 +349,9 @@ public class GradingWindowController {
     }
 
     private void saveCurrentEditorToDraft(String studentPackage) {
-        StudentDraft d = drafts.computeIfAbsent(studentPackage, StudentDraft::new);
-
         int caret = reportEditor.getCaretPosition();
-        d.setCaretPosition(caret);
         String text = reportEditor.getText() == null ? "" : reportEditor.getText();
-        d.setMarkdown(text);
-        d.setLoadedFromDisk(true);
+        draftSessionService.saveEditorState(studentPackage, text, caret);
     }
 
     private void restoreCaretAfterUpdate(String studentPackage, int caretToRestore) {
@@ -388,30 +366,26 @@ public class GradingWindowController {
 
             suppressCaretEvents = false;
 
-            StudentDraft d = drafts.get(studentPackage);
-            if (d != null) {
-                d.setCaretPosition(caret);
-            }
+            draftSessionService.updateCaretIfPresent(studentPackage, caret);
         });
     }
 
     private void loadDraftIntoEditor(String studentPackage) {
         currentStudent = studentPackage;
-        StudentDraft d = drafts.computeIfAbsent(studentPackage, StudentDraft::new);
-        boolean needsReload = !d.isLoadedFromDisk()
-                || d.getMarkdown() == null
-                || d.getMarkdown().trim().isEmpty();
+        boolean needsReload = draftSessionService.needsReload(studentPackage);
         if (needsReload) {
             String md = loadInitialMarkdownForStudent(studentPackage);
             md = normalizeRubricAndSummaryBlocks(md, studentPackage);
-            d.setMarkdown(md);
-            d.setLoadedFromDisk(true);
-            if (d.getCaretPosition() < 0) {
-                d.setCaretPosition(0);
-            }
+            draftSessionService.setMarkdown(studentPackage, md);
+            draftSessionService.setLoadedFromDisk(studentPackage, true);
         }
-        int desiredCaret = d.getCaretPosition();
-        setEditorTextPreservingCaret(currentStudent, d.getMarkdown(), desiredCaret, false);
+        int desiredCaret = draftSessionService.getCaretPosition(studentPackage);
+        setEditorTextPreservingCaret(
+                currentStudent,
+                draftSessionService.getMarkdown(studentPackage),
+                desiredCaret,
+                false
+        );
 
         // rebuild modifies text; it must also restore caret again AFTER it finishes
         rebuildRubricAndSummaryInEditor(desiredCaret, false);
@@ -419,313 +393,7 @@ public class GradingWindowController {
     }
 
     private String normalizeRubricAndSummaryBlocks(String md, String studentPackage) {
-        String text = md == null ? "" : md;
-        String existingRubric =
-                extractBlockContents(text, RUBRIC_TABLE_BEGIN, RUBRIC_TABLE_END);
-
-        String rawRubric = null;
-        if (existingRubric == null || existingRubric.isBlank()) {
-            rawRubric = extractRawRubricTable(text);
-        }
-        if (existingRubric == null || existingRubric.isBlank()) {
-            existingRubric = extractFirstRawRubricTable(text);
-        }
-        String existingSummary =
-                extractBlockContents(text, COMMENTS_SUMMARY_BEGIN, COMMENTS_SUMMARY_END);
-
-        // If the report came from the repo (gradedown export), it often has a blockquote rubric table.
-        // Capture it BEFORE removing it, so we can preserve checkstyle/unit-test deductions.
-        String rawRubricTable = extractRawRubricTableBlockquote(text);
-
-        text = cleanBrokenTitleLine(text);
-
-        text = removeAllBlocks(text, RUBRIC_TABLE_BEGIN, RUBRIC_TABLE_END);
-        text = removeAllBlocks(text, COMMENTS_SUMMARY_BEGIN, COMMENTS_SUMMARY_END);
-
-        // Remove heading and the old raw rubric table so we don't duplicate anything.
-        text = removeStandaloneRubricHeadings(text);
-        text = removeRawRubricTables(text);
-
-        String rubricInside;
-        if (rawRubricTable != null && !rawRubricTable.isBlank()) {
-            rubricInside = rawRubricTable.trim();
-        } else if (existingRubric != null && !existingRubric.isBlank()) {
-            rubricInside = existingRubric.trim();
-        } else {
-            rubricInside = buildRubricGradeTableMarkdown(new ArrayList<>());
-        }
-
-        String summaryInside;
-        if (existingSummary != null && !existingSummary.isBlank()) {
-            summaryInside = existingSummary.trim();
-        } else {
-            summaryInside = buildCommentSummaryMarkdown(new ArrayList<>());
-        }
-
-        String rubricBlock =
-                RUBRIC_TABLE_BEGIN + System.lineSeparator()
-                        + rubricInside + System.lineSeparator()
-                        + RUBRIC_TABLE_END;
-
-        String summaryBlock =
-                COMMENTS_SUMMARY_BEGIN + System.lineSeparator()
-                        + summaryInside + System.lineSeparator()
-                        + COMMENTS_SUMMARY_END;
-
-        // Insert right after the first heading paragraph (same logic as before, but no extra "## Rubric")
-        int insertPos = 0;
-        String[] lines = text.split("\\R", -1);
-        int running = 0;
-        boolean foundHeading = false;
-        boolean foundInsert = false;
-
-        for (int i = 0; i < lines.length && !foundInsert; i++) {
-            String line = lines[i];
-            String t = line == null ? "" : line.trim();
-            running += (line == null ? 0 : line.length()) + 1;
-
-            if (!foundHeading && t.startsWith("#")) {
-                foundHeading = true;
-            } else if (foundHeading && t.isEmpty()) {
-                insertPos = running;
-                foundInsert = true;
-            }
-        }
-
-        if (insertPos <= 0 || insertPos > text.length()) {
-            insertPos = 0;
-        }
-
-        while (insertPos < text.length() && (text.charAt(insertPos) == '\n' || text.charAt(insertPos) == '\r')) {
-            insertPos++;
-        }
-
-        StringBuilder out = new StringBuilder();
-        out.append(text, 0, insertPos);
-
-        // Make spacing predictable: exactly one blank line before blocks (unless at file start)
-        if (out.length() > 0 && out.charAt(out.length() - 1) != '\n') {
-            out.append(System.lineSeparator());
-        }
-        out.append(System.lineSeparator());
-
-        out.append(rubricBlock)
-                .append(System.lineSeparator())
-                .append(System.lineSeparator())
-                .append(summaryBlock)
-                .append(System.lineSeparator())
-                .append(System.lineSeparator());
-
-        out.append(text.substring(insertPos));
-
-        // Trim leading blank lines at top to avoid “white space at the top”
-        String normalized = out.toString();
-        normalized = normalized.replaceFirst("^(\\s*\\R)+", "");
-
-        return normalized;
-    }
-
-    private String extractRawRubricTable(String text) {
-        if (text == null || text.isBlank()) {
-            return null;
-        }
-
-        final Pattern header = Pattern.compile(
-                "(?m)^>>\\s*\\|\\s*Earned\\s*\\|\\s*Possible\\s*\\|\\s*Criteria.*$"
-        );
-
-        Matcher m = header.matcher(text);
-        if (!m.find()) {
-            return null;
-        }
-
-        final int start = m.start();
-
-        // Collect until a blank line after the table begins
-        String after = text.substring(start);
-        String[] lines = after.split("\\R", -1);
-
-        StringBuilder sb = new StringBuilder();
-
-        final int minLinesToCountAsTable = 3;
-        int tableLines = 0;
-        boolean done = false;
-
-        for (int i = 0; i < lines.length && !done; i++) {
-            String line = lines[i];
-
-            if (line.trim().isEmpty()) {
-                if (tableLines >= minLinesToCountAsTable) {
-                    done = true;
-                }
-            } else {
-                sb.append(line).append(System.lineSeparator());
-                tableLines++;
-            }
-        }
-
-        String out = sb.toString().trim();
-        if (out.isEmpty()) {
-            return null;
-        }
-        return out;
-    }
-
-    private String extractRawRubricTableBlockquote(String text) {
-        if (text == null || text.isBlank()) {
-            return null;
-        }
-
-        String[] lines = text.split("\\R", -1);
-
-        boolean inTable = false;
-        StringBuilder sb = new StringBuilder();
-
-        for (String line : lines) {
-            String t = line == null ? "" : line.trim();
-
-            boolean isHeader =
-                    t.startsWith(">>")
-                            && t.contains("|")
-                            && t.toLowerCase().contains("earned")
-                            && t.toLowerCase().contains("possible")
-                            && t.toLowerCase().contains("criteria");
-
-            if (!inTable) {
-                if (isHeader) {
-                    inTable = true;
-                    sb.append(line).append(System.lineSeparator());
-                }
-            } else {
-                boolean isTableLine = t.startsWith(">>") && t.contains("|");
-                boolean isBlank = t.isEmpty();
-
-                if (isBlank) {
-                    // stop at the first blank line after the table
-                    return sb.toString().trim();
-                }
-
-                if (isTableLine) {
-                    sb.append(line).append(System.lineSeparator());
-                } else {
-                    // stop when we hit non-table content
-                    return sb.toString().trim();
-                }
-            }
-        }
-
-        String out = sb.toString().trim();
-        return out.isEmpty() ? null : out;
-    }
-
-    private String removeAllBlocks(String text, String begin, String end) {
-        if (text == null || text.isEmpty()) {
-            return text;
-        }
-
-        String out = text;
-
-        while (true) {
-            int b = out.indexOf(begin);
-            if (b < 0) {
-                break;
-            }
-
-            int e = out.indexOf(end, b + begin.length());
-            if (e < 0) {
-                // broken block: remove the begin marker and continue
-                out = out.substring(0, b) + out.substring(b + begin.length());
-                continue;
-            }
-
-            int afterEnd = e + end.length();
-            out = out.substring(0, b) + out.substring(afterEnd);
-        }
-
-        return out;
-    }
-
-    private String removeStandaloneRubricHeadings(String text) {
-        if (text == null || text.isBlank()) {
-            return text;
-        }
-
-        String[] lines = text.split("\\R", -1);
-        List<String> kept = new ArrayList<>();
-
-        for (String line : lines) {
-            String t = line.trim();
-            if (t.equals("## Rubric")) {
-                continue;
-            }
-            kept.add(line);
-        }
-
-        return String.join(System.lineSeparator(), kept);
-    }
-
-    private String cleanBrokenTitleLine(String text) {
-        if (text == null || text.isBlank()) {
-            return text;
-        }
-        String[] lines = text.split("\\R", -1);
-        if (lines.length == 0) {
-            return text;
-        }
-        String first = lines[0];
-        // If the first line contains these headings glued on, strip them off
-        first = first.replace("## Rubric", "");
-        first = first.replace("## Source Code", "");
-        // if "##" is glued on without a space, remove it anyway
-        first = first.replace("##", "");
-        // normalize spaces
-        first = first.replaceAll("\\s{2,}", " ").trim();
-        // Also fix accidental no-space joins
-        first = first.replaceAll("\\s{2,}", " ").trim();
-        lines[0] = first;
-        return String.join(System.lineSeparator(), lines);
-    }
-
-    private String removeRawRubricTables(String text) {
-        if (text == null || text.isBlank()) {
-            return text;
-        }
-        // Allow leading whitespace before >>
-        final String prefix = "(?ms)^\\s*>>\\s*\\|";
-        // Full rubric table (header + rows)
-        text = text.replaceAll(
-                prefix + "\\s*Earned\\s*\\|\\s*Possible\\s*\\|\\s*Criteria.*?\\R" +
-                        "(^\\s*>>\\s*\\|[- ]+\\|[- ]+\\|[- ]+\\|\\R)?" +
-                        "(^\\s*>>\\s*\\|\\s*\\d+\\s*\\|\\s*\\d+\\s*\\|.*\\|\\R)+\\R?",
-                ""
-        );
-        // Row-only rubric table (2+ numeric rows)
-        text = text.replaceAll(
-                "(?ms)(^\\s*>>\\s*\\|\\s*\\d+\\s*\\|\\s*\\d+\\s*\\|.*\\|\\R){2,}\\R?",
-                ""
-        );
-        return text;
-    }
-
-    private String extractFirstRawRubricTable(String text) {
-        String out = null;
-
-        if (text != null && !text.isBlank()) {
-
-            final String pattern =
-                    "(?ms)^\\s*>>\\s*\\|\\s*Earned\\s*\\|\\s*Possible\\s*\\|\\s*Criteria\\s*\\|.*\\R" +
-                            "^\\s*>>\\s*\\|\\s*[- ]+\\s*\\|\\s*[- ]+\\s*\\|\\s*[- ]+\\s*\\|.*\\R" +
-                            "(^\\s*>>\\s*\\|.*\\|\\s*\\R)+";
-
-            Pattern p = Pattern.compile(pattern);
-            Matcher m = p.matcher(text);
-
-            if (m.find()) {
-                out = m.group().trim();
-            }
-        }
-
-        return out;
+        return gradingReportEditorService.normalizeRubricAndSummaryBlocks(md);
     }
 
     /**
@@ -752,101 +420,11 @@ public class GradingWindowController {
     }
 
     private String buildFreshReportSkeleton(String studentPackage) {
-        return "# " + assignment.getAssignmentName() + System.lineSeparator() +
-                System.lineSeparator() +
-
-                // rubric table placeholder
-                RUBRIC_TABLE_BEGIN + System.lineSeparator() +
-                buildRubricGradeTableMarkdown(new ArrayList<>()) + System.lineSeparator() +
-                RUBRIC_TABLE_END + System.lineSeparator() +
-                System.lineSeparator() +
-
-                // comments summary placeholder
-                COMMENTS_SUMMARY_BEGIN + System.lineSeparator() +
-                buildCommentSummaryMarkdown(new ArrayList<>()) + System.lineSeparator() +
-                COMMENTS_SUMMARY_END + System.lineSeparator() +
-                System.lineSeparator() +
-                "> # Feedback" + System.lineSeparator() +
-                "> * " + System.lineSeparator() +
-                System.lineSeparator() +
-                "_No report found for " + studentPackage + "._" +
-                System.lineSeparator();
+        return gradingReportEditorService.buildFreshReportSkeleton(studentPackage);
     }
 
     private String ensurePatchCSectionsExist(String md, String studentPackage) {
-        String text = md == null ? "" : md;
-        boolean hasRubric = text.contains(RUBRIC_TABLE_BEGIN) && text.contains(RUBRIC_TABLE_END);
-        boolean hasSummary = text.contains(COMMENTS_SUMMARY_BEGIN)
-                && text.contains(COMMENTS_SUMMARY_END);
-        if (hasRubric && hasSummary) {
-            return text;
-        }
-        // Build a skeleton and then append the rest below it.
-        String skeleton = buildFreshReportSkeleton(studentPackage);
-        // If the extracted markdown already starts with "#", don't duplicate title.
-        // Just insert missing blocks after the first heading.
-        if (text.trim().startsWith("#")) {
-            // keep extracted report but inject blocks after the first heading section
-            return injectMissingBlocksIntoExisting(text);
-        }
-        // fallback: skeleton + extracted report
-        return skeleton + System.lineSeparator() + text;
-    }
-
-    private String injectMissingBlocksIntoExisting(String md) {
-        String text = md == null ? "" : md;
-        boolean hasRubric = text.contains(RUBRIC_TABLE_BEGIN) && text.contains(RUBRIC_TABLE_END);
-        boolean hasSummary = text.contains(COMMENTS_SUMMARY_BEGIN)
-                && text.contains(COMMENTS_SUMMARY_END);
-        if (hasRubric && hasSummary) {
-            return text;
-        }
-        String[] lines = text.split("\\R", -1);
-        // find the first blank line after the first heading
-        int insertAtLine = -1;
-        boolean sawHeading = false;
-        boolean done = false;
-        for (int i = 0; i < lines.length && !done; i++) {
-            String t = lines[i].trim();
-            if (!sawHeading && t.startsWith("#")) {
-                sawHeading = true;
-            } else if (sawHeading && t.isEmpty()) {
-                insertAtLine = i + 1;
-                done = true;
-            }
-        }
-
-        if (insertAtLine < 0) {
-            insertAtLine = 1;
-        }
-
-        StringBuilder sb = new StringBuilder();
-
-        for (int i = 0; i < lines.length; i++) {
-            sb.append(lines[i]).append(System.lineSeparator());
-
-            if (i == insertAtLine - 1) {
-                if (!hasRubric) {
-                    sb.append(System.lineSeparator());
-                    sb.append(RUBRIC_TABLE_BEGIN).append(System.lineSeparator());
-                    // Leave empty on purpose: normalizeRubricAndSummaryBlocks will preserve
-                    // the rubric already present in the report (including checkstyle/unit-test deductions).
-                    sb.append(System.lineSeparator());
-                    sb.append(RUBRIC_TABLE_END).append(System.lineSeparator());
-                    sb.append(System.lineSeparator());
-                }
-                if (!hasSummary) {
-                    sb.append(System.lineSeparator());
-                    sb.append(COMMENTS_SUMMARY_BEGIN).append(System.lineSeparator());
-                    sb.append(buildCommentSummaryMarkdown(new ArrayList<>()))
-                            .append(System.lineSeparator());
-                    sb.append(COMMENTS_SUMMARY_END).append(System.lineSeparator());
-                    sb.append(System.lineSeparator());
-                }
-            }
-        }
-
-        return sb.toString();
+        return gradingReportEditorService.ensurePatchSectionsExist(md, studentPackage);
     }
 
     @FXML
@@ -968,488 +546,13 @@ public class GradingWindowController {
     private void rebuildRubricAndSummaryInEditor(int caretToRestore, boolean centerCaret) {
         String text = reportEditor.getText() == null ? "" : reportEditor.getText();
         List<ParsedComment> comments = Comments.parseInjectedComments(text);
-        String newSummary = buildCommentSummaryMarkdown(comments);
-        text = text.replace("\r\n", "\n");
-        String updated = replaceBlock(text, COMMENTS_SUMMARY_BEGIN, COMMENTS_SUMMARY_END, newSummary);
-        String updatedRubric = buildUpdatedRubricBlockFromExisting(updated, comments);
-        updated = replaceBlock(updated, RUBRIC_TABLE_BEGIN, RUBRIC_TABLE_END, updatedRubric);
+        String updated = gradingReportEditorService.rebuildRubricAndSummary(text, comments);
         if (!updated.equals(text)) {
             setEditorTextPreservingCaret(currentStudent, updated, caretToRestore, centerCaret);
         } else {
             // Even if no text changed, still restore caret reliably.
             Platform.runLater(() -> restoreCaretAfterUpdate(currentStudent, caretToRestore));
         }
-    }
-
-    private String buildUpdatedRubricBlockFromExisting(String fullText, List<ParsedComment> comments) {
-
-        String safe = fullText == null ? "" : fullText;
-
-        String existingBlock = extractBlockContents(safe, RUBRIC_TABLE_BEGIN, RUBRIC_TABLE_END);
-        if (existingBlock == null || existingBlock.isBlank()) {
-            return buildRubricGradeTableMarkdown(comments);
-        }
-
-        Map<String, Integer> manualLostByRubricId = computeManualDeductionsByRubricId(comments);
-
-        Map<String, String> rubricIdToCriteriaName = buildRubricIdToCriteriaNameMap();
-
-        List<RubricRow> rows = parseRubricRows(existingBlock);
-
-        if (rows.isEmpty()) {
-            return existingBlock;
-        }
-
-        applyManualDeductions(rows, manualLostByRubricId, rubricIdToCriteriaName);
-
-        recomputeTotalRow(rows);
-
-        return renderRubricRows(rows, existingBlock);
-    }
-
-    private String extractBlockContents(String text, String begin, String end) {
-        if (text == null) {
-            return null;
-        }
-
-        int b = text.indexOf(begin);
-        int e = text.indexOf(end);
-
-        if (b < 0 || e < 0 || e < b) {
-            return null;
-        }
-
-        int start = b + begin.length();
-
-        String inside = text.substring(start, e);
-
-        return inside.trim();
-    }
-
-    private Map<String, Integer> computeManualDeductionsByRubricId(List<ParsedComment> comments) {
-        Map<String, Integer> manual = new LinkedHashMap<>();
-
-        if (comments != null) {
-            for (ParsedComment c : comments) {
-                if (c == null) {
-                    continue;
-                }
-                String id = c.rubricItemId();
-                if (id == null || id.isBlank()) {
-                    continue;
-                }
-
-                int lost = Math.max(0, c.pointsLost());
-                manual.put(id, manual.getOrDefault(id, 0) + lost);
-            }
-        }
-
-        return manual;
-    }
-
-    private Map<String, String> buildRubricIdToCriteriaNameMap() {
-        Map<String, String> map = new LinkedHashMap<>();
-
-        if (assignment != null
-                && assignment.getRubric() != null
-                && assignment.getRubric().getItems() != null
-                && assignmentsFile != null
-                && assignmentsFile.getRubricItemLibrary() != null) {
-
-            for (RubricItemRef ref : assignment.getRubric().getItems()) {
-                if (ref == null) {
-                    continue;
-                }
-
-                String id = ref.getRubricItemId();
-                if (id == null || id.isBlank()) {
-                    continue;
-                }
-
-                RubricItemDef def = assignmentsFile.getRubricItemLibrary().get(id);
-
-                String criteriaName = id;
-                if (def != null && def.getName() != null && !def.getName().isBlank()) {
-                    criteriaName = def.getName().trim();
-                }
-
-                map.put(id, criteriaName);
-            }
-        }
-
-        return map;
-    }
-
-    private List<RubricRow> parseRubricRows(String rubricBlock) {
-        List<RubricRow> rows = new ArrayList<>();
-
-        if (rubricBlock == null || rubricBlock.isBlank()) {
-            return rows;
-        }
-
-        String[] lines = rubricBlock.split("\\R", -1);
-
-        for (String line : lines) {
-            if (line == null) {
-                continue;
-            }
-
-            String trimmed = line.trim();
-
-            boolean isRow = trimmed.startsWith(">> |");
-            boolean isSeparator = trimmed.contains("---");
-            boolean isHeader = trimmed.toLowerCase().contains("| earned |")
-                    && trimmed.toLowerCase().contains("| possible |");
-
-            if (isRow && !isSeparator && !isHeader) {
-                RubricRow row = tryParseRubricRowLine(trimmed);
-                if (row != null) {
-                    rows.add(row);
-                }
-            }
-        }
-
-        return rows;
-    }
-
-    private RubricRow tryParseRubricRowLine(String trimmed) {
-        final String prefix = ">>";
-        String s = trimmed;
-
-        if (s.startsWith(prefix)) {
-            s = s.substring(prefix.length()).trim();
-        }
-
-        String[] parts = s.split("\\|", -1);
-
-        final int earnedIndex = 1;
-        final int possibleIndex = 2;
-        final int criteriaIndex = 3;
-        final int minParts = 5;
-
-        RubricRow row = null;
-
-        if (parts.length >= minParts) {
-            String earnedStr = parts[earnedIndex].trim();
-            String possibleStr = parts[possibleIndex].trim();
-            String criteriaStr = parts[criteriaIndex].trim();
-
-            Double earned = tryParseDouble(earnedStr);
-            Integer possible = tryParseInt(possibleStr);
-
-            if (earned != null && possible != null && !criteriaStr.isBlank()) {
-                row = new RubricRow(earned, possible, criteriaStr, trimmed);
-            }
-        }
-
-        return row;
-    }
-
-    private Integer tryParseInt(String s) {
-        Integer out = null;
-
-        if (s != null) {
-            try {
-                out = Integer.parseInt(s.trim());
-            } catch (NumberFormatException ignored) {
-                out = null;
-            }
-        }
-
-        return out;
-    }
-
-    private Double tryParseDouble(String s) {
-        Double out = null;
-
-        if (s != null) {
-            try {
-                out = Double.parseDouble(s.trim());
-            } catch (NumberFormatException ignored) {
-                out = null;
-            }
-        }
-
-        return out;
-    }
-
-    private void applyManualDeductions(List<RubricRow> rows,
-                                       Map<String, Integer> manualLostByRubricId,
-                                       Map<String, String> rubricIdToCriteriaName) {
-
-        if (rows == null || rows.isEmpty() || manualLostByRubricId == null || manualLostByRubricId.isEmpty()) {
-            return;
-        }
-
-        for (Map.Entry<String, Integer> entry : manualLostByRubricId.entrySet()) {
-            String rubricId = entry.getKey();
-            int lost = entry.getValue() == null ? 0 : entry.getValue();
-
-            String criteriaName = rubricIdToCriteriaName.get(rubricId);
-            if (criteriaName == null || criteriaName.isBlank()) {
-                criteriaName = rubricId;
-            }
-
-            RubricRow matching = findRowByCriteria(rows, criteriaName);
-
-            if (matching != null) {
-                double newEarned = matching.earned - Math.max(0, lost);
-                newEarned = Math.max(0, Math.min(newEarned, (double) matching.possible));
-                matching.earned = newEarned;
-            }
-        }
-    }
-
-    private RubricRow findRowByCriteria(List<RubricRow> rows, String criteriaName) {
-        RubricRow found = null;
-
-        if (rows != null && criteriaName != null) {
-            String target = normalizeCriteria(criteriaName);
-
-            for (RubricRow r : rows) {
-                if (r != null) {
-                    String actual = normalizeCriteria(r.criteria);
-
-                    boolean matches = actual.equalsIgnoreCase(target);
-                    if (matches) {
-                        found = r;
-                    }
-                }
-            }
-        }
-
-        return found;
-    }
-
-    private String normalizeCriteria(String s) {
-        String out = s == null ? "" : s.trim();
-        out = out.replaceAll("\\s+", " ");
-        return out;
-    }
-
-    private void recomputeTotalRow(List<RubricRow> rows) {
-        if (rows == null || rows.isEmpty()) {
-            return;
-        }
-        final String totalLabel = "TOTAL";
-        RubricRow totalRow = null;
-        double earnedSum = 0.0;
-        int possibleSum = 0;
-        for (RubricRow r : rows) {
-            if (r == null) {
-                continue;
-            }
-            boolean isTotal = r.criteria != null && r.criteria.trim().equalsIgnoreCase(totalLabel);
-            if (isTotal) {
-                totalRow = r;
-            } else {
-                earnedSum += Math.max(0, r.earned);
-                possibleSum += Math.max(0, r.possible);
-            }
-        }
-
-        if (totalRow != null) {
-            totalRow.earned = earnedSum;
-            totalRow.possible = possibleSum;
-        }
-    }
-
-    private String renderRubricRows(List<RubricRow> parsedRows, String existingBlock) {
-
-        if (existingBlock == null) {
-            existingBlock = "";
-        }
-
-        String[] lines = existingBlock.split("\\R", -1);
-
-        Map<String, RubricRow> criteriaToRow = new LinkedHashMap<>();
-        for (RubricRow r : parsedRows) {
-            if (r != null) {
-                criteriaToRow.put(normalizeCriteria(r.criteria).toLowerCase(), r);
-            }
-        }
-
-        StringBuilder out = new StringBuilder();
-
-        for (String line : lines) {
-            String original = line == null ? "" : line;
-            String trimmed = original.trim();
-
-            boolean isRow = trimmed.startsWith(">> |");
-            boolean isSeparator = trimmed.contains("---");
-            boolean isHeader = trimmed.toLowerCase().contains("| earned |")
-                    && trimmed.toLowerCase().contains("| possible |");
-
-            String toWrite = original;
-
-            if (isRow && !isSeparator && !isHeader) {
-                RubricRow maybe = tryParseRubricRowLine(trimmed);
-                if (maybe != null) {
-                    String key = normalizeCriteria(maybe.criteria).toLowerCase();
-                    RubricRow updated = criteriaToRow.get(key);
-                    if (updated != null) {
-                        toWrite = formatRowLikeOriginal(updated, original);
-                    }
-                }
-            }
-
-            out.append(toWrite).append(System.lineSeparator());
-        }
-
-        return out.toString().trim();
-    }
-
-    private String formatRubricPoints(double pts) {
-        final double delta = 0.00001;
-        if (Math.abs(pts - Math.round(pts)) < delta) {
-            return Integer.toString((int) Math.round(pts));
-        }
-        return String.format(java.util.Locale.US, "%.2f", pts);
-    }
-
-    private String formatRowLikeOriginal(RubricRow updated, String originalLine) {
-        final String prefix = ">> |";
-        final String pipe = "|";
-        String criteria = updated.criteria == null ? "" : updated.criteria;
-        String earnedStr = formatRubricPoints(updated.earned);
-        String possibleStr = Integer.toString(updated.possible);
-        final int earnedPad = 6;
-        final int possiblePad = 8;
-        return prefix + " " + padLeft(earnedStr, earnedPad) + " " + pipe + " "
-                + padLeft(possibleStr, possiblePad) + " " + pipe + " "
-                + criteria + " " + pipe;
-    }
-
-    private String padLeft(String s, int width) {
-        String text = s == null ? "" : s;
-
-        StringBuilder sb = new StringBuilder();
-
-        int spaces = Math.max(0, width - text.length());
-        for (int i = 0; i < spaces; i++) {
-            sb.append(' ');
-        }
-        sb.append(text);
-
-        return sb.toString();
-    }
-
-    private static final class RubricRow {
-        private double earned;
-        private int possible;
-        private final String criteria;
-        private final String originalLine;
-
-        private RubricRow(double earned, int possible, String criteria, String originalLine) {
-            this.earned = earned;
-            this.possible = possible;
-            this.criteria = criteria;
-            this.originalLine = originalLine;
-        }
-    }
-
-    private String replaceBlock(String text,
-                                String beginMarker,
-                                String endMarker,
-                                String newContent) {
-
-        String src = text == null ? "" : text;
-
-        int b = src.indexOf(beginMarker);
-        int e = src.indexOf(endMarker);
-
-        if (b < 0 || e < 0 || e < b) {
-            return src;
-        }
-
-        int start = b + beginMarker.length();
-        String before = src.substring(0, start);
-        String current = src.substring(start, e);
-        String after = src.substring(e);
-
-        String normalizedCurrent = current == null ? "" : current.trim();
-        String normalizedNew = newContent == null ? "" : newContent.trim();
-
-        if (normalizedCurrent.equals(normalizedNew)) {
-            return src;
-        }
-
-        return before
-                + System.lineSeparator()
-                + normalizedNew
-                + System.lineSeparator()
-                + after;
-    }
-
-    private String buildCommentSummaryMarkdown(List<ParsedComment> comments) {
-        StringBuilder sb = new StringBuilder();
-
-        sb.append(">> # Comments").append(System.lineSeparator());
-        sb.append(">>").append(System.lineSeparator());
-
-        if (comments == null || comments.isEmpty()) {
-            sb.append(">> * _No comments._").append(System.lineSeparator());
-            return sb.toString();
-        }
-
-        for (ParsedComment c : comments) {
-            sb.append(">> * [")
-                    .append(escapeMdText(c.title()))
-                    .append("](")
-                    .append("#")
-                    .append(c.anchorId())
-                    .append(") ");
-
-            sb.append("(-")
-                    .append(c.pointsLost())
-                    .append(" ")
-                    .append(c.rubricItemId())
-                    .append(")");
-
-            sb.append(System.lineSeparator());
-        }
-
-        return sb.toString();
-    }
-
-    private String escapeMdText(String s) {
-        if (s == null) {
-            return "";
-        }
-        return s.replace("[", "\\[")
-                .replace("]", "\\]")
-                .replace("(", "\\(")
-                .replace(")", "\\)");
-    }
-
-    private String buildRubricGradeTableMarkdown(List<ParsedComment> comments) {
-        // Compute manual deductions by rubric item id
-        Map<String, Integer> manualDeductions = new LinkedHashMap<>();
-        if (comments != null) {
-            for (ParsedComment c : comments) {
-                if (c == null) {
-                    continue;
-                }
-                String id = c.rubricItemId();
-                if (id == null || id.isBlank()) {
-                    continue;
-                }
-                int lost = Math.max(0, c.pointsLost());
-                manualDeductions.put(
-                        id,
-                        manualDeductions.getOrDefault(id, 0) + lost
-                );
-            }
-        }
-
-        return RubricTableBuilder.buildRubricMarkdown(
-                assignment,
-                assignmentsFile,
-                null,   // checkstyle violations (not used here)
-                null,   // unit test failures (not used here)
-                null,   // total unit tests (not used here)
-                manualDeductions
-        );
     }
 
     private CommentDef openCommentPicker() {
@@ -1620,101 +723,93 @@ public class GradingWindowController {
 
     @FXML
     private void onSaveDrafts() {
-        boolean success = true;
-        int caret = reportEditor.getCaretPosition();
+        beginSaveDrafts(null);
+    }
 
+    private void beginSaveDrafts(Runnable onComplete) {
+        if (saveInProgress) {
+            status("Save already in progress.");
+            return;
+        }
+
+        saveInProgress = true;
+        prepareCurrentDraftForSave();
+        setSaveUiDisabled(true);
+
+        ExecutorService exec = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "save-drafts");
+            t.setDaemon(true);
+            return t;
+        });
+
+        CompletableFuture
+                .supplyAsync(this::saveDraftsWorker, exec)
+                .thenAccept(result -> Platform.runLater(() ->
+                        handleSaveDraftResult(result, onComplete)))
+                .whenComplete((_, _) -> exec.shutdown());
+    }
+
+    private void handleSaveDraftResult(SaveDraftResult result,
+                                       Runnable onComplete) {
+        saveInProgress = false;
+        setSaveUiDisabled(false);
+        status(result.message());
+
+        if (result.success() && onComplete != null) {
+            onComplete.run();
+        }
+    }
+
+    private void prepareCurrentDraftForSave() {
+        int caret = reportEditor.getCaretPosition();
         rebuildRubricAndSummaryInEditor(caret, false);
 
         if (currentStudent != null) {
-            StudentDraft d = drafts.computeIfAbsent(currentStudent, StudentDraft::new);
-            d.setMarkdown(reportEditor.getText() == null ? "" : reportEditor.getText());
-            d.setCaretPosition(caret);
-            d.setLoadedFromDisk(true);
+            String markdown = reportEditor.getText() == null ? "" : reportEditor.getText();
+            draftSessionService.saveEditorState(currentStudent, markdown, caret);
+        }
+    }
+
+    private SaveDraftResult saveDraftsWorker() {
+        GradingSyncService.SaveDraftResult result = gradingSyncService.saveDrafts(
+                new ArrayList<>(studentPackages),
+                buildDraftAccess(),
+                currentStudent,
+                this::loadInitialMarkdownForStudent,
+                this::findRepoDirForStudentPackage,
+                gradingDraftService,
+                assignmentId
+        );
+        return new SaveDraftResult(result.success(), result.message());
+    }
+
+    private void setSaveUiDisabled(boolean disabled) {
+        if (saveAndExportButton != null) {
+            saveAndExportButton.setDisable(disabled);
         }
 
-        int wrote = 0;
-
-        for (String pkg : studentPackages) {
-            StudentDraft d = drafts.computeIfAbsent(pkg, StudentDraft::new);
-
-            if (!d.isLoadedFromDisk()
-                    || d.getMarkdown() == null
-                    || d.getMarkdown().trim().isEmpty()) {
-
-                d.setMarkdown(loadInitialMarkdownForStudent(pkg));
-                d.setLoadedFromDisk(true);
-
-                if (!pkg.equals(currentStudent)) {
-                    d.setCaretPosition(0);
-                }
-            }
-
-            Path repoDir = findRepoDirForStudentPackage(pkg);
-            if (repoDir == null) {
-                status("Could not find repo for " + pkg);
-                success = false;
-            } else {
-                try {
-                    String markdown = d.getMarkdown() == null ? "" : d.getMarkdown();
-
-                    gradingDraftService.saveReportMarkdown(
-                            assignmentId,
-                            pkg,
-                            repoDir,
-                            markdown
-                    );
-
-                    wrote++;
-                } catch (IOException e) {
-                    status("Failed writing report for " + pkg + ": " + e.getMessage());
-                    success = false;
-                }
-            }
+        if (studentList != null) {
+            studentList.setDisable(disabled);
         }
 
-        if (success) {
-            status("Saved " + wrote + " HTML report(s) to student repositories.");
+        if (reportEditor != null) {
+            reportEditor.setDisable(disabled);
         }
     }
 
     @FXML
     private void onExportGradedHtml() {
-        onSaveDrafts();
+        beginSaveDrafts(null);
     }
 
     private Path findRepoDirForStudentPackage(String studentPackage) {
-        Path mappingFile = loadOrReconstructMappings();
-        if (mappingFile == null || !Files.isRegularFile(mappingFile)) {
-            return null;
-        }
-        try {
-            // We intentionally parse only what we need.
-            ObjectMapper mapper = new ObjectMapper();
-            Map<String, Map<String, String>> mapping =
-                    mapper.readValue(
-                            Files.readAllBytes(mappingFile),
-                            new TypeReference<>() {
-                            }
-                    );
-            Map<String, String> entry = mapping.get(studentPackage);
-            if (entry == null) {
-                return null;
-            }
-            String repoPath = entry.get("repoPath");
-            if (repoPath == null || repoPath.isBlank()) {
-                return null;
-            }
-
-            Path repoDir = Path.of(repoPath);
-
-            if (!Files.isDirectory(repoDir)) {
-                return null;
-            }
-
-            return repoDir;
-        } catch (IOException e) {
-            return null;
-        }
+        return gradingMappingsService.findRepoDirForStudentPackage(
+                studentPackage,
+                mappingsPath,
+                assignmentId,
+                rootPath,
+                appDataDir()
+        );
     }
 
     private String wrapMarkdownAsHtml(String title, String markdown) {
@@ -1723,23 +818,11 @@ public class GradingWindowController {
 
     @FXML
     private void onSaveAndExport() {
-        if (saveAndExportButton != null) {
-            saveAndExportButton.setDisable(true);
-        }
+        beginSaveDrafts(this::beginPushAllRepos);
+    }
 
-        if (currentStudent != null) {
-            saveCurrentEditorToDraft(currentStudent);
-        }
-
-        try {
-            onSaveDrafts();
-        } catch (Exception e) {
-            status("Save failed: " + e.getMessage());
-            if (saveAndExportButton != null) {
-                saveAndExportButton.setDisable(false);
-            }
-            return;
-        }
+    private void beginPushAllRepos() {
+        setSaveUiDisabled(true);
 
         ExecutorService exec = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "push-feedback");
@@ -1750,78 +833,43 @@ public class GradingWindowController {
         CompletableFuture.runAsync(() -> {
             PushResult r = pushAllRepos();
             Platform.runLater(() -> {
-                status("Save/push complete: pushed " + r.pushed +
-                        ", skipped " + r.skipped + ", failed " + r.failed + ".");
-                if (saveAndExportButton != null) {
-                    saveAndExportButton.setDisable(false);
+                String message = "Save/push complete: pushed " + r.pushed +
+                        ", skipped " + r.skipped + ", failed " + r.failed + ".";
+
+                if (!r.detailSummary.isBlank()) {
+                    message = message + " " + r.detailSummary;
                 }
+
+                status(message);
+                setSaveUiDisabled(false);
             });
         }, exec).whenComplete((_, _) -> exec.shutdown());
     }
 
     private PushResult pushAllRepos() {
-        int pushed = 0;
-        int skipped = 0;
-        int failed = 0;
-
-        for (String pkg : studentPackages) {
-            Path repoDir = findRepoDirForStudentPackage(pkg);
-            if (repoDir == null) {
-                failed++;
-                continue;
-            }
-
-            String baseName = assignmentId + pkg;
-            Path outHtml = repoDir.resolve(baseName + ".html");
-
-            if (!Files.exists(outHtml)) {
-                skipped++;
-                continue;
-            }
-
-            try {
-                int add = runGit(repoDir, "add", outHtml.getFileName().toString());
-
-                if (add != 0) {
-                    failed++;
-                } else {
-                    int commit = runGit(repoDir, "commit", "-m", "Add feedback for " + assignmentId);
-
-                    if (commit != 0) {
-                        skipped++;
-                    } else {
-                        int push = runGit(repoDir, "push");
-
-                        if (push != 0) {
-                            failed++;
-                        } else {
-                            pushed++;
-                        }
-                    }
-                }
-            } catch (IOException | InterruptedException e) {
-                failed++;
-            }
-        }
-
-        return new PushResult(pushed, skipped, failed);
+        GradingSyncService.PushResult result = gradingSyncService.pushAllRepos(
+                new ArrayList<>(studentPackages),
+                this::findRepoDirForStudentPackage,
+                assignmentId
+        );
+        return new PushResult(
+                result.pushed(),
+                result.skipped(),
+                result.failed(),
+                result.detailSummary()
+        );
     }
 
-    private int runGit(Path repoDir, String... args) throws IOException, InterruptedException {
-        List<String> cmd = new ArrayList<>();
-        cmd.add("git");
-        Collections.addAll(cmd, args);
+    private PreflightResult preflightPush(Path repoDir,
+                                          String reportFileName)
+            throws IOException, InterruptedException {
+        GradingSyncService.PreflightResult result =
+                gradingSyncService.preflightPush(repoDir, reportFileName);
+        return new PreflightResult(result.allowed(), result.message());
+    }
 
-        ProcessBuilder pb = new ProcessBuilder(cmd);
-        pb.directory(repoDir.toFile());
-        pb.redirectErrorStream(true);
-
-        Process p = pb.start();
-        // Drain output so git won't block on full buffer
-        try (var in = p.getInputStream()) {
-            in.readAllBytes();
-        }
-        return p.waitFor();
+    private String summarizeDetails(List<String> details) {
+        return gradingSyncService.summarizeDetails(details);
     }
 
     @FXML
@@ -1855,74 +903,69 @@ public class GradingWindowController {
         final int pushed;
         final int skipped;
         final int failed;
+        final String detailSummary;
 
-        PushResult(int pushed, int skipped, int failed) {
+        PushResult(int pushed, int skipped, int failed, String detailSummary) {
             this.pushed = pushed;
             this.skipped = skipped;
             this.failed = failed;
+            this.detailSummary = detailSummary;
         }
+    }
+
+    private record PreflightResult(boolean allowed,
+                                   String message) {
+    }
+
+    private record SaveDraftResult(boolean success,
+                                   String message) {
+    }
+
+    private GradingSyncService.DraftAccess buildDraftAccess() {
+        return new GradingSyncService.DraftAccess() {
+            @Override
+            public boolean isLoadedFromDisk(String studentPackage) {
+                return draftSessionService.isLoadedFromDisk(studentPackage);
+            }
+
+            @Override
+            public String getMarkdown(String studentPackage) {
+                return draftSessionService.getMarkdown(studentPackage);
+            }
+
+            @Override
+            public void setMarkdown(String studentPackage, String markdown) {
+                draftSessionService.setMarkdown(studentPackage, markdown);
+            }
+
+            @Override
+            public void setLoadedFromDisk(String studentPackage,
+                                          boolean loadedFromDisk) {
+                draftSessionService.setLoadedFromDisk(studentPackage, loadedFromDisk);
+            }
+
+            @Override
+            public void setCaretPosition(String studentPackage,
+                                         int caretPosition) {
+                draftSessionService.setCaretPosition(studentPackage, caretPosition);
+            }
+        };
     }
 
 
     @FXML
     private void onCloseAndSaveAll() {
-        if (currentStudent != null) {
-            saveCurrentEditorToDraft(currentStudent);
-        }
-
-        onSaveDrafts();
-        onExportGradedHtml();
-        highlightExecutor.shutdownNow();
-        Stage stage = (Stage) studentList.getScene().getWindow();
-        stage.close();
+        beginSaveDrafts(() -> {
+            highlightExecutor.shutdownNow();
+            Stage stage = (Stage) studentList.getScene().getWindow();
+            stage.close();
+        });
     }
 
 
     private void status(String msg) {
         if (statusLabel != null) {
             statusLabel.setText(msg == null ? "" : msg);
-        }
-    }
-
-    /**
-     * In-memory per-student report state.
-     */
-    private static class StudentDraft {
-        private final String studentPackage;
-        private String markdown = "";
-        private int caretPosition = 0;
-        private boolean loadedFromDisk = false;
-
-        public StudentDraft(String studentPackage) {
-            this.studentPackage = studentPackage;
-        }
-
-        public String getStudentPackage() {
-            return studentPackage;
-        }
-
-        public String getMarkdown() {
-            return markdown;
-        }
-
-        public void setMarkdown(String markdown) {
-            this.markdown = markdown == null ? "" : markdown;
-        }
-
-        public int getCaretPosition() {
-            return caretPosition;
-        }
-
-        public void setCaretPosition(int caretPosition) {
-            this.caretPosition = Math.max(0, caretPosition);
-        }
-
-        public boolean isLoadedFromDisk() {
-            return loadedFromDisk;
-        }
-
-        public void setLoadedFromDisk(boolean loadedFromDisk) {
-            this.loadedFromDisk = loadedFromDisk;
         }
     }
 
@@ -2011,12 +1054,11 @@ public class GradingWindowController {
             suppressCaretEvents = false;
 
             if (studentPackage != null) {
-                StudentDraft d = drafts.get(studentPackage);
-                if (d != null) {
-                    d.setCaretPosition(caret);
-                    d.setMarkdown(reportEditor.getText());
-                    d.setLoadedFromDisk(true);
-                }
+                draftSessionService.updateFromEditorIfPresent(
+                        studentPackage,
+                        reportEditor.getText(),
+                        caret
+                );
             }
         });
     }
@@ -2117,212 +1159,28 @@ public class GradingWindowController {
     }
 
     private Path loadOrReconstructMappings() {
-
-        Path mappingFile = getAssignmentMappingsFile();
-        Path mappingsDir = mappingFile != null ? mappingFile.getParent() : null;
-
-        if (mappingFile == null || mappingsDir == null) {
+        Map<String, String> mapping = loadMappingsForUse();
+        if (mapping.isEmpty()) {
             return null;
         }
 
-        if (Files.isRegularFile(mappingFile)) {
-
-            boolean valid = mappingsFileHasValidRepoPaths(mappingFile);
-
-            if (valid) {
-                return mappingFile;
-            }
-
-            status("Existing mappings invalid on this machine. Reconstructing...");
-        }
-
-        Map<String, Map<String, String>> reconstructed =
-                reconstructMappingsFromRoot();
-
-        if (reconstructed.isEmpty()) {
-            status("No repositories found for reconstruction.");
-            return null;
-        }
-
-        try {
-            Files.createDirectories(mappingsDir);
-
-            ObjectMapper mapper = new ObjectMapper();
-            mapper.writerWithDefaultPrettyPrinter()
-                    .writeValue(mappingFile.toFile(), reconstructed);
-
-            status("Reconstructed mappings.json from root folder.");
-
-            return mappingFile;
-
-        } catch (IOException e) {
-            status("Failed to write reconstructed mappings.json: " + e.getMessage());
-            return null;
-        }
+        return resolveMappingFile();
     }
 
-    private boolean mappingsFileHasValidRepoPaths(Path mappingFile) {
-
-        if (mappingFile == null || !Files.isRegularFile(mappingFile)) {
-            return false;
-        }
-
-        try {
-            ObjectMapper mapper = new ObjectMapper();
-
-            Map<String, Map<String, String>> mapping =
-                    mapper.readValue(
-                            Files.readAllBytes(mappingFile),
-                            new TypeReference<>() {
-                            }
-                    );
-
-            if (mapping == null || mapping.isEmpty()) {
-                return false;
-            }
-
-            for (Map<String, String> entry : mapping.values()) {
-
-                if (entry == null) {
-                    return false;
-                }
-
-                String repoPath = entry.get("repoPath");
-
-                if (repoPath == null || repoPath.isBlank()) {
-                    return false;
-                }
-
-                Path repoDir = Path.of(repoPath);
-
-                if (!Files.isDirectory(repoDir)) {
-                    return false;
-                }
-            }
-
-            return true;
-
-        } catch (IOException e) {
-            return false;
-        }
+    private Map<String, String> loadMappingsForUse() {
+        return gradingMappingsService.loadMappingsForUse(
+                mappingsPath,
+                assignmentId,
+                rootPath,
+                appDataDir()
+        );
     }
 
-    private Map<String, Map<String, String>> reconstructMappingsFromRoot() {
-        status("Root path = " + rootPath);
-        if (rootPath == null) {
-            status("Root path is NULL");
-        }
-        Map<String, Map<String, String>> mapping = new LinkedHashMap<>();
-
-        if (rootPath == null || !Files.isDirectory(rootPath)) {
-            return mapping;
-        }
-
-        Path reposContainer = null;
-
-        try (var stream = Files.list(rootPath)) {
-
-            for (Path child : stream.toList()) {
-
-                if (!Files.isDirectory(child)) {
-                    continue;
-                }
-
-                if (child.getFileName().toString().equalsIgnoreCase("packages")) {
-                    continue;
-                }
-
-                // Check if this directory actually contains repos
-                boolean containsAssignmentReports = false;
-
-                try (var sub = Files.list(child)) {
-                    for (Path maybeRepo : sub.toList()) {
-
-                        if (!Files.isDirectory(maybeRepo)) {
-                            continue;
-                        }
-
-                        try (var files = Files.list(maybeRepo)) {
-                            for (Path f : files.toList()) {
-
-                                String name = f.getFileName().toString();
-
-                                if (name.startsWith(assignmentId)
-                                        && name.endsWith(".html")) {
-                                    containsAssignmentReports = true;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (containsAssignmentReports) {
-                    reposContainer = child;
-                }
-            }
-
-        } catch (IOException e) {
-            status("Failed scanning root: " + e.getMessage());
-            return mapping;
-        }
-
-        if (reposContainer == null || !Files.isDirectory(reposContainer)) {
-            return mapping;
-        }
-
-        try (var repos = Files.list(reposContainer)) {
-
-            for (Path repoDir : repos.toList()) {
-
-                if (!Files.isDirectory(repoDir)) {
-                    continue;
-                }
-
-                try (var files = Files.list(repoDir)) {
-
-                    for (Path file : files.toList()) {
-
-                        String fileName = file.getFileName().toString();
-
-                        if (fileName.startsWith(assignmentId)
-                                && fileName.endsWith(".html")) {
-
-                            String studentPackage =
-                                    fileName.substring(
-                                            assignmentId.length(),
-                                            fileName.length() - ".html".length()
-                                    );
-
-                            Map<String, String> entry = new LinkedHashMap<>();
-                            entry.put("repoPath", repoDir.toAbsolutePath().toString());
-
-                            mapping.put(studentPackage, entry);
-                        }
-                    }
-
-                }
-            }
-
-        } catch (IOException e) {
-            status("Failed scanning repos: " + e.getMessage());
-        }
-        status("Reconstructed mapping count: " + mapping.size());
-        return mapping;
-    }
-
-    private Path getAssignmentMappingsFile() {
-
-        if (assignmentId == null || assignmentId.isBlank()) {
-            return null;
-        }
-
-        Path mappingsDir = appDataDir().resolve("mappings");
-
-        final String fileNamePrefix = "mappings-";
-        final String extension = ".json";
-
-        String fileName = fileNamePrefix + assignmentId + extension;
-
-        return mappingsDir.resolve(fileName);
+    private Path resolveMappingFile() {
+        return gradingMappingsService.resolveMappingFile(
+                mappingsPath,
+                assignmentId,
+                appDataDir()
+        );
     }
 }

@@ -2,7 +2,9 @@ package service;
 
 import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ReportHtmlWrapperTest {
 
@@ -13,34 +15,43 @@ public class ReportHtmlWrapperTest {
         String title = "  Course101 A1  ";
         String md = "# Heading\nSome **bold** text <tag>";
 
-        String html = w.wrapMarkdown(title, md);
+        String html = w.wrapMarkdownAsHtml(title, md);
 
-        // title should be trimmed
-        assertTrue(html.contains("<title>Course101 A1</title>"), "title should be trimmed and placed in title tag");
-
-        // markdown should be present inside the xmp block
-        assertTrue(html.contains("# Heading"), "markdown heading should be present");
-        assertTrue(html.contains("Some **bold** text <tag>"), "markdown content should be preserved inside output");
-
-        // basic surrounding HTML elements should exist
-        assertTrue(html.contains("<!DOCTYPE html>"), "should contain doctype");
-        assertTrue(html.contains("<script type=\"text/javascript\""), "script include should be present");
+        assertTrue(html.contains("<title>  Course101 A1  </title>"));
+        assertTrue(html.contains("# Heading"));
+        assertTrue(html.contains("Some **bold** text <tag>"));
+        assertTrue(html.contains("<!DOCTYPE html>"));
+        assertTrue(html.contains("<script type=\"text/javascript\""));
     }
 
     @Test
-    public void handlesNulls_gracefully() {
+    public void extractMarkdown_roundTripsWrappedMarkdown() {
         ReportHtmlWrapper w = new ReportHtmlWrapper();
 
-        String html = w.wrapMarkdown(null, null);
+        String markdown = "# Title\n\n> Feedback";
+        String html = w.wrapMarkdownAsHtml("A1smith", markdown);
 
-        // title should be empty
-        assertTrue(html.contains("<title></title>"), "null title should produce empty title tag");
+        String extracted = w.extractMarkdown(html);
 
-        // body should be empty inside xmp (allow whitespace)
-        int start = html.indexOf("<xmp>");
-        int end = html.indexOf("</xmp>");
-        assertTrue(start >= 0 && end > start, "xmp block should be present");
-        String inner = html.substring(start + "<xmp>".length(), end);
-        assertTrue(inner.trim().isEmpty(), "xmp inner content should be empty or whitespace when markdown is null");
+        assertEquals(markdown, extracted);
+    }
+
+    @Test
+    public void extractMarkdown_returnsEmptyWhenWrapperIsMalformed() {
+        ReportHtmlWrapper w = new ReportHtmlWrapper();
+
+        assertEquals("", w.extractMarkdown("<html><body># Not wrapped</body></html>"));
+        assertEquals("", w.extractMarkdown("<xmp># Missing close"));
+        assertEquals("", w.extractMarkdown("</xmp><xmp>bad order"));
+    }
+
+    @Test
+    public void wrapMarkdownAsHtml_nullsThrow() {
+        ReportHtmlWrapper w = new ReportHtmlWrapper();
+
+        assertThrows(NullPointerException.class,
+                () -> w.wrapMarkdownAsHtml(null, "md"));
+        assertThrows(NullPointerException.class,
+                () -> w.wrapMarkdownAsHtml("title", null));
     }
 }

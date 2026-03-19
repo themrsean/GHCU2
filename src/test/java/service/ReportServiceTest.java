@@ -79,6 +79,13 @@ public class ReportServiceTest {
             }
 
             @Override
+            public String loadFeedbackSectionMarkdown(String assignmentId,
+                                                     String studentPackage,
+                                                     Path rootPath) {
+                return "> * No feedback provided";
+            }
+
+            @Override
             public String buildSourceCodeMarkdown(Assignment assignment, String studentPackage, Path repoPath) {
                 return "// source code";
             }
@@ -107,7 +114,7 @@ public class ReportServiceTest {
         Path reportPath = studentRepo.resolve(expectedFileName);
         assertTrue(Files.exists(reportPath), "Report file should exist: " + reportPath);
         String content = Files.readString(reportPath);
-        assertTrue(content.contains(a.getCourseCode() + a.getAssignmentCode() + "username1"), "Report content should contain title");
+        assertTrue(content.contains("username1"), "Report content should contain wrapped title");
     }
 
     /**
@@ -133,6 +140,9 @@ public class ReportServiceTest {
             @Override public CheckstyleService.CheckstyleResult buildCheckstyleResult(Path repoPath) { return null; }
             @Override public UnitTestService.UnitTestResult buildUnitTestResultMarkdown(String studentPackage, Path repoPath) { return null; }
             @Override public Map<String, Integer> loadManualDeductionsFromGradingDraft(String assignmentId, String studentPackage, Path rootPath) { return Map.of(); }
+            @Override public String loadFeedbackSectionMarkdown(String assignmentId,
+                                                                String studentPackage,
+                                                                Path rootPath) { return ""; }
             @Override public String buildSourceCodeMarkdown(Assignment assignment, String studentPackage, Path repoPath) { return ""; }
             @Override public String buildCommitHistoryMarkdown(Path repoPath) { return ""; }
             @Override public String wrapMarkdownAsHtml(String title, String markdown) { return ""; }

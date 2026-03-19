@@ -42,6 +42,9 @@ public class ReportsStepTest {
             @Override public service.CheckstyleService.CheckstyleResult buildCheckstyleResult(Path repoPath) { return new service.CheckstyleService.CheckstyleResult("", 0); }
             @Override public service.UnitTestService.UnitTestResult buildUnitTestResultMarkdown(String studentPackage, Path repoPath) { return new service.UnitTestService.UnitTestResult("", 0, 0); }
             @Override public java.util.Map<String, Integer> loadManualDeductionsFromGradingDraft(String assignmentId, String studentPackage, Path rootPath) { return Collections.emptyMap(); }
+            @Override public String loadFeedbackSectionMarkdown(String assignmentId,
+                                                                String studentPackage,
+                                                                Path rootPath) { return ""; }
             @Override public String buildSourceCodeMarkdown(Assignment assignment, String studentPackage, Path repoPath) { return ""; }
             @Override public String buildCommitHistoryMarkdown(Path repoPath) { return ""; }
             @Override public String wrapMarkdownAsHtml(String title, String markdown) { return markdown; }
@@ -70,6 +73,9 @@ public class ReportsStepTest {
             @Override public service.CheckstyleService.CheckstyleResult buildCheckstyleResult(Path repoPath) { return new service.CheckstyleService.CheckstyleResult("", 0); }
             @Override public service.UnitTestService.UnitTestResult buildUnitTestResultMarkdown(String studentPackage, Path repoPath) { return new service.UnitTestService.UnitTestResult("", 0, 0); }
             @Override public java.util.Map<String, Integer> loadManualDeductionsFromGradingDraft(String assignmentId, String studentPackage, Path rootPath) { return Collections.emptyMap(); }
+            @Override public String loadFeedbackSectionMarkdown(String assignmentId,
+                                                                String studentPackage,
+                                                                Path rootPath) { return ""; }
             @Override public String buildSourceCodeMarkdown(Assignment assignment, String studentPackage, Path repoPath) { return ""; }
             @Override public String buildCommitHistoryMarkdown(Path repoPath) { return ""; }
             @Override public String wrapMarkdownAsHtml(String title, String markdown) { return markdown; }
@@ -105,6 +111,9 @@ public class ReportsStepTest {
             @Override public service.CheckstyleService.CheckstyleResult buildCheckstyleResult(Path repoPath) { return new service.CheckstyleService.CheckstyleResult("", 0); }
             @Override public service.UnitTestService.UnitTestResult buildUnitTestResultMarkdown(String studentPackage, Path repoPath) { return new service.UnitTestService.UnitTestResult("", 0, 0); }
             @Override public java.util.Map<String, Integer> loadManualDeductionsFromGradingDraft(String assignmentId, String studentPackage, Path rootPath) { return Collections.emptyMap(); }
+            @Override public String loadFeedbackSectionMarkdown(String assignmentId,
+                                                                String studentPackage,
+                                                                Path rootPath) { return ""; }
             @Override public String buildSourceCodeMarkdown(Assignment assignment, String studentPackage, Path repoPath) { return ""; }
             @Override public String buildCommitHistoryMarkdown(Path repoPath) { return ""; }
             @Override public String wrapMarkdownAsHtml(String title, String markdown) { return markdown; }

@@ -33,7 +33,7 @@ public class ReportHtmlWrapper {
         int endIndex = html.indexOf(CLOSE_XMP_TAG);
 
         if (startIndex < 0 || endIndex < 0 || endIndex < startIndex) {
-            return html;
+            return "";
         }
 
         int contentStartIndex = startIndex + OPEN_XMP_TAG.length();

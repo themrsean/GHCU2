@@ -4,10 +4,13 @@
  */
 package service;
 
+import model.Comments;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.regex.Matcher;
@@ -16,6 +19,8 @@ import java.util.regex.Pattern;
 public class GradingDraftService {
 
     private static final String HTML_EXTENSION = ".html";
+    private static final String COMMENTS_SUMMARY_BEGIN = "<!-- COMMENTS_SUMMARY_BEGIN -->";
+    private static final String COMMENTS_SUMMARY_END = "<!-- COMMENTS_SUMMARY_END -->";
     private static final String FEEDBACK_HEADER = "> # Feedback";
     private static final String DEFAULT_FEEDBACK_MARKDOWN = "> * No feedback provided";
 
@@ -104,7 +109,36 @@ public class GradingDraftService {
     }
 
     private Map<String, Integer> parseManualDeductions(String markdown) {
+        Map<String, Integer> deductions = parseInjectedCommentDeductions(markdown);
 
+        if (!deductions.isEmpty()) {
+            return deductions;
+        }
+
+        return parseLegacyManualDeductions(markdown);
+    }
+
+    private Map<String, Integer> parseInjectedCommentDeductions(String markdown) {
+        Map<String, Integer> deductions = new LinkedHashMap<>();
+
+        List<Comments.ParsedComment> parsedComments =
+                Comments.parseInjectedComments(markdown);
+
+        for (Comments.ParsedComment comment : parsedComments) {
+            String rubricItemId = comment.rubricItemId();
+            if (rubricItemId == null || rubricItemId.isBlank()) {
+                continue;
+            }
+
+            int pointsLost = Math.max(0, comment.pointsLost());
+            int updatedPoints = deductions.getOrDefault(rubricItemId, 0) + pointsLost;
+            deductions.put(rubricItemId, updatedPoints);
+        }
+
+        return deductions;
+    }
+
+    private Map<String, Integer> parseLegacyManualDeductions(String markdown) {
         Map<String, Integer> deductions = new LinkedHashMap<>();
 
         if (markdown == null || markdown.isBlank()) {
@@ -127,49 +161,113 @@ public class GradingDraftService {
     }
 
     private String extractFeedbackSectionMarkdown(String markdown) {
-
         if (markdown == null || markdown.isBlank()) {
             return "";
         }
 
-        int feedbackHeaderIndex = markdown.indexOf(FEEDBACK_HEADER);
-        if (feedbackHeaderIndex < 0) {
+        String withoutSummaryBlocks = GradingMarkdownSections.removeAllBlocks(
+                markdown,
+                COMMENTS_SUMMARY_BEGIN,
+                COMMENTS_SUMMARY_END
+        );
+
+        String fromFeedbackSection = extractFromFeedbackHeader(withoutSummaryBlocks);
+        if (!fromFeedbackSection.isBlank()) {
+            return fromFeedbackSection;
+        }
+
+        String blockContents = GradingMarkdownSections.extractBlockContentsOrEmpty(
+                markdown,
+                COMMENTS_SUMMARY_BEGIN,
+                COMMENTS_SUMMARY_END
+        );
+        if (!blockContents.isBlank()) {
+            return stripFeedbackHeader(blockContents);
+        }
+
+        return "";
+    }
+
+    private String extractFromFeedbackHeader(String markdown) {
+        if (markdown == null || markdown.isBlank()) {
             return "";
         }
 
-        int feedbackBodyStartIndex = feedbackHeaderIndex + FEEDBACK_HEADER.length();
-        String remainingMarkdown = markdown.substring(feedbackBodyStartIndex);
+        String[] lines = markdown.split("\\R", -1);
+        int feedbackHeaderLine = -1;
 
-        String[] lines = remainingMarkdown.split("\\R", -1);
-        StringBuilder feedbackBuilder = new StringBuilder();
-        boolean sawFeedbackContent = false;
-
-        for (String line : lines) {
-            boolean lineStartsBlockQuote = line.startsWith(">");
-            boolean lineIsBlank = line.isBlank();
-
-            if (!sawFeedbackContent) {
-                if (lineIsBlank) {
-                    continue;
-                }
-
-                if (lineStartsBlockQuote) {
-                    feedbackBuilder.append(line).append(System.lineSeparator());
-                    sawFeedbackContent = true;
-                } else {
-                    return "";
-                }
-            } else {
-                if (lineStartsBlockQuote) {
-                    feedbackBuilder.append(line).append(System.lineSeparator());
-                } else if (lineIsBlank) {
-                    break;
-                } else {
-                    break;
-                }
+        for (int i = 0; i < lines.length; i++) {
+            if (FEEDBACK_HEADER.equals(lines[i].trim())) {
+                feedbackHeaderLine = i;
+                break;
             }
         }
 
-        return feedbackBuilder.toString().trim();
+        if (feedbackHeaderLine < 0) {
+            return "";
+        }
+
+        StringBuilder feedbackBuilder = new StringBuilder();
+        boolean sawFeedbackContent = false;
+
+        for (int i = feedbackHeaderLine + 1; i < lines.length; i++) {
+            String line = lines[i];
+            String trimmed = line == null ? "" : line.trim();
+            boolean isSectionHeading = trimmed.startsWith("## ");
+
+            if (isSectionHeading) {
+                if (sawFeedbackContent) {
+                    break;
+                }
+                continue;
+            }
+
+            if (!sawFeedbackContent && trimmed.isEmpty()) {
+                continue;
+            }
+
+            feedbackBuilder.append(line).append(System.lineSeparator());
+            sawFeedbackContent = true;
+        }
+
+        return trimSurroundingBlankLines(feedbackBuilder.toString());
+    }
+
+    private String stripFeedbackHeader(String blockContents) {
+        String trimmed = blockContents.trim();
+
+        if (!trimmed.startsWith(FEEDBACK_HEADER)) {
+            return trimmed;
+        }
+
+        String withoutHeader = trimmed.substring(FEEDBACK_HEADER.length());
+        String normalized = withoutHeader.replaceFirst("^\\R+", "");
+        return normalized.trim();
+    }
+
+    private String trimSurroundingBlankLines(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+
+        String[] lines = text.split("\\R", -1);
+        int first = 0;
+        int last = lines.length - 1;
+
+        while (first <= last && lines[first].trim().isEmpty()) {
+            first++;
+        }
+        while (last >= first && lines[last].trim().isEmpty()) {
+            last--;
+        }
+
+        StringBuilder out = new StringBuilder();
+        for (int i = first; i <= last; i++) {
+            out.append(lines[i]);
+            if (i < last) {
+                out.append(System.lineSeparator());
+            }
+        }
+        return out.toString();
     }
 }

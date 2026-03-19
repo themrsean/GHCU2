@@ -70,11 +70,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.ResourceBundle;
+import java.util.function.Consumer;
 
 /**
  * Main Window Controller
  */
 public class MainWindowController implements Initializable {
+
+    static final int RUBRIC_EXPECTED_TOTAL = 100;
 
     // ============================================================
     // FXML FIELDS
@@ -246,56 +249,45 @@ public class MainWindowController implements Initializable {
      * Call after any state change.
      */
     private void updateUiState() {
-        boolean hasCloneCommand = cloneCommandField.getText() != null
-                && !cloneCommandField.getText().trim().isEmpty();
-        boolean hasRootPath = selectedRootPath != null;
-        boolean hasAssignment = assignmentCombo.getValue() != null;
-        boolean checkstyleEnabled = checkstyleCheckBox.isSelected();
-        boolean hasCheckstyleUrl = checkstyleUrlField.getText() != null
-                && !checkstyleUrlField.getText().trim().isEmpty();
+        Assignment selectedAssignment = assignmentCombo.getValue();
+        boolean hasAssignmentsLoaded = assignmentCombo.getItems() != null
+                && !assignmentCombo.getItems().isEmpty();
 
-        boolean checkstyleReady;
-        if (checkstyleEnabled) {
-            checkstyleReady = hasCheckstyleUrl;
-        } else {
-            checkstyleReady = true;
-        }
-
-        boolean rubricValid = isSelectedAssignmentRubricValid();
-
-        boolean canExtract = hasRootPath && hasAssignment && rubricValid;
-        boolean canReports = hasRootPath && hasAssignment && rubricValid && checkstyleReady;
-        boolean canRunAll = hasCloneCommand && hasAssignment && rubricValid && checkstyleReady;
-        boolean canImports = hasRootPath && hasAssignment && rubricValid;
+        UiState uiState = evaluateUiState(
+                cloneCommandField.getText(),
+                selectedRootPath,
+                selectedAssignment,
+                checkstyleCheckBox.isSelected(),
+                checkstyleUrlField.getText(),
+                hasAssignmentsLoaded
+        );
 
         if (pullMenuItem != null) {
-            pullMenuItem.setDisable(!hasCloneCommand);
+            pullMenuItem.setDisable(!uiState.pullEnabled());
         }
         if (extractMenuItem != null) {
-            extractMenuItem.setDisable(!canExtract);
+            extractMenuItem.setDisable(!uiState.extractEnabled());
         }
         if (importsMenuItem != null) {
-            importsMenuItem.setDisable(!canImports);
+            importsMenuItem.setDisable(!uiState.importsEnabled());
         }
         if (reportsMenuItem != null) {
-            reportsMenuItem.setDisable(!canReports);
+            reportsMenuItem.setDisable(!uiState.reportsEnabled());
         }
         if (runAllMenuItem != null) {
-            runAllMenuItem.setDisable(!canRunAll);
+            runAllMenuItem.setDisable(!uiState.runAllEnabled());
         }
         if (editAssignmentMenuItem != null) {
-            editAssignmentMenuItem.setDisable(!hasAssignment);
+            editAssignmentMenuItem.setDisable(!uiState.editAssignmentEnabled());
         }
         if (deleteAssignmentMenuItem != null) {
-            deleteAssignmentMenuItem.setDisable(!hasAssignment);
+            deleteAssignmentMenuItem.setDisable(!uiState.deleteAssignmentEnabled());
         }
         if (gradeAssignmentMenuItem != null) {
-            gradeAssignmentMenuItem.setDisable(!hasRootPath || !hasAssignment);
+            gradeAssignmentMenuItem.setDisable(!uiState.gradeAssignmentEnabled());
         }
         if (exportAssignmentsMenuItem != null) {
-            boolean hasAssignmentsLoaded = assignmentCombo.getItems() != null
-                    && !assignmentCombo.getItems().isEmpty();
-            exportAssignmentsMenuItem.setDisable(!hasAssignmentsLoaded);
+            exportAssignmentsMenuItem.setDisable(!uiState.exportAssignmentsEnabled());
         }
     }
 
@@ -633,10 +625,9 @@ public class MainWindowController implements Initializable {
     @FXML
     private void onPull() {
         String rawCommand = cloneCommandField.getText();
-        if (rawCommand == null || rawCommand.trim().isEmpty()) {
-            logInfo("Pull aborted: GitHub Classroom command is empty.");
-        } else if (selectedRootPath == null) {
-            logInfo("Pull aborted: Repository root is not set.");
+        String abortReason = pullAbortReason(rawCommand, selectedRootPath);
+        if (abortReason != null) {
+            logInfo(abortReason);
         } else {
             logInfo("Running pull command...");
             logInfo("Working directory: " + selectedRootPath);
@@ -647,46 +638,42 @@ public class MainWindowController implements Initializable {
             if (runAllMenuItem != null) {
                 runAllMenuItem.setDisable(true);
             }
-            List<String> args = processRunner.tokenizeCommand(rawCommand.trim());
-            if (args.isEmpty()) {
-                logInfo("Pull aborted: Could not parse command.");
-                updateUiState();
-            } else {
-                Thread worker = new Thread(() -> {
-                    final int finalExit = processRunner.runAndLog(args, selectedRootPath,
-                            logger::log);
-                    Platform.runLater(() -> {
+            String parseAbortReason = startPullIfParsable(
+                    rawCommand,
+                    selectedRootPath,
+                    processRunner,
+                    logger::log,
+                    finalExit -> Platform.runLater(() -> {
                         if (finalExit == 0) {
                             logInfo("Pull completed successfully.");
                         } else if (finalExit != -1) {
                             logInfo("Pull completed with exit code: " + finalExit);
                         }
                         updateUiState();
-                    });
-                }, "pull-worker");
-
-                worker.setDaemon(true);
-                worker.start();
+                    }),
+                    MainWindowController::startDaemonThread
+            );
+            if (parseAbortReason != null) {
+                logInfo(parseAbortReason);
+                updateUiState();
             }
         }
     }
 
     @FXML
     private void onExtract() {
-        if (selectedRootPath == null) {
-            logInfo("Extract aborted: Repository root is not set.");
-        } else if (assignmentCombo.getValue() == null) {
-            logInfo("Extract aborted: No assignment selected.");
+        String abortReason = extractAbortReason(selectedRootPath, assignmentCombo.getValue());
+        if (abortReason != null) {
+            logInfo(abortReason);
         } else {
-            Thread worker = new Thread(() -> {
-                try {
-                    extractPackagesWorker();
-                    logger.log("Extract complete.");
-                } catch (IOException e) {
-                    logger.log("Extract failed: " + e.getMessage());
-                }
-                Platform.runLater(this::updateUiState);
-            }, "extract-worker");
+            Runnable workerAction = buildIoWorker(
+                    this::extractPackagesWorker,
+                    "Extract complete.",
+                    "Extract failed: ",
+                    logger::log,
+                    () -> Platform.runLater(this::updateUiState)
+            );
+            Thread worker = new Thread(workerAction, "extract-worker");
 
             worker.setDaemon(true);
             worker.start();
@@ -695,20 +682,18 @@ public class MainWindowController implements Initializable {
 
     @FXML
     private void onGenerateImports() {
-        if (selectedRootPath == null) {
-            logInfo("Generate Imports aborted: Repository root is not set.");
-        } else if (assignmentCombo.getValue() == null) {
-            logInfo("Generate Imports aborted: No assignment selected.");
+        String abortReason = importsAbortReason(selectedRootPath, assignmentCombo.getValue());
+        if (abortReason != null) {
+            logInfo(abortReason);
         } else {
-            Thread worker = new Thread(() -> {
-                try {
-                    generateImportsWorker();
-                    logger.log("Generate Imports complete.");
-                } catch (IOException e) {
-                    logger.log("Generate Imports failed: " + e.getMessage());
-                }
-                Platform.runLater(this::updateUiState);
-            }, "imports-worker");
+            Runnable workerAction = buildIoWorker(
+                    this::generateImportsWorker,
+                    "Generate Imports complete.",
+                    "Generate Imports failed: ",
+                    logger::log,
+                    () -> Platform.runLater(this::updateUiState)
+            );
+            Thread worker = new Thread(workerAction, "imports-worker");
 
             worker.setDaemon(true);
             worker.start();
@@ -717,15 +702,13 @@ public class MainWindowController implements Initializable {
 
     @FXML
     private void onGenerateReports() {
-        if (selectedRootPath == null) {
-            logInfo("Generate Reports aborted: Repository root is not set.");
-        } else if (!Files.exists(selectedRootPath) || !Files.isDirectory(selectedRootPath)) {
-            logInfo("Generate Reports aborted: Repository root does not exist or " +
-                    "is not a directory.");
-        } else if (assignmentCombo.getValue() == null) {
-            logInfo("Generate Reports aborted: No assignment selected.");
-        } else if (!isSelectedAssignmentRubricValid()) {
-            logInfo("Generate Reports aborted: Rubric total must be exactly 100 points.");
+        String abortReason = reportsAbortReason(
+                selectedRootPath,
+                assignmentCombo.getValue(),
+                isSelectedAssignmentRubricValid()
+        );
+        if (abortReason != null) {
+            logInfo(abortReason);
         } else {
             if (reportsMenuItem != null) {
                 reportsMenuItem.setDisable(true);
@@ -745,36 +728,20 @@ public class MainWindowController implements Initializable {
 
     @FXML
     private void onRunAll() {
-        boolean ok = true;
-
         String cloneCmd = cloneCommandField.getText();
         Assignment assignment = assignmentCombo.getValue();
-        Path root = selectedRootPath;
+        String abortReason = startRunAllIfValid(
+                selectedRootPath,
+                assignment,
+                isSelectedAssignmentRubricValid(),
+                cloneCmd,
+                this::disableRunAllMenuItems,
+                this::runAllWorker,
+                MainWindowController::startDaemonThread
+        );
 
-        if (selectedRootPath == null) {
-            logInfo("Run All aborted: Repository root is not set.");
-            ok = false;
-        } else if (assignment == null) {
-            logInfo("Run All aborted: No assignment selected.");
-            ok = false;
-        } else if (!isSelectedAssignmentRubricValid()) {
-            logInfo("Run All aborted: Rubric total must be exactly 100 points.");
-            ok = false;
-        } else if (cloneCmd == null || cloneCmd.trim().isEmpty()) {
-            logInfo("Run All aborted: GitHub Classroom command is empty.");
-            ok = false;
-        }
-
-        if (ok) {
-            disableRunAllMenuItems();
-
-            Thread worker = new Thread(
-                    () -> runAllWorker(cloneCmd, assignment, root),
-                    "runall-worker"
-            );
-
-            worker.setDaemon(true);
-            worker.start();
+        if (abortReason != null) {
+            logInfo(abortReason);
         }
     }
 
@@ -796,41 +763,85 @@ public class MainWindowController implements Initializable {
 
         ReportService reportService =
                 new ReportService(assignmentsFile, reportDeps);
-
-        WorkflowStep pullStep =
-                new PullStep(processRunner, serviceLogger);
-
-        WorkflowStep extractStep =
-                new ExtractStep(mappingService, serviceLogger);
-
-        WorkflowStep importsStep =
-                new ImportsStep(importsService, serviceLogger);
-
-        WorkflowStep reportsStep =
-                new ReportsStep(reportService, serviceLogger);
-
-        List<WorkflowStep> steps = List.of(
-                pullStep,
-                extractStep,
-                importsStep,
-                reportsStep
+        List<WorkflowStep> steps = buildRunAllSteps(
+                processRunner,
+                serviceLogger,
+                mappingService,
+                importsService,
+                reportService
         );
+        executeRunAllWorkflow(
+                cloneCmd,
+                assignment,
+                root,
+                mappingsPath,
+                steps,
+                serviceLogger,
+                this::updateUiState,
+                Platform::runLater
+        );
+    }
 
-        RunAllService service =
-                new RunAllService(steps, serviceLogger);
+    static List<WorkflowStep> buildRunAllSteps(ProcessRunner processRunner,
+                                               ServiceLogger serviceLogger,
+                                               MappingService mappingService,
+                                               ImportsService importsService,
+                                               ReportService reportService) {
+        WorkflowStep pullStep = new PullStep(processRunner, serviceLogger);
+        WorkflowStep extractStep = new ExtractStep(mappingService, serviceLogger);
+        WorkflowStep importsStep = new ImportsStep(importsService, serviceLogger);
+        WorkflowStep reportsStep = new ReportsStep(reportService, serviceLogger);
+        return List.of(pullStep, extractStep, importsStep, reportsStep);
+    }
 
+    static void executeRunAllWorkflow(String cloneCmd,
+                                      Assignment assignment,
+                                      Path root,
+                                      Path mappingsPath,
+                                      List<WorkflowStep> steps,
+                                      ServiceLogger serviceLogger,
+                                      Runnable uiUpdateAction,
+                                      UiScheduler uiScheduler) {
+        RunAllService service = new RunAllService(steps, serviceLogger);
         service.runAll(cloneCmd, assignment, root, mappingsPath);
-
-        Platform.runLater(this::updateUiState);
+        uiScheduler.runLater(uiUpdateAction);
     }
 
     private @NonNull MainWindowReportDependencies buildReportDependencies(
             ServiceLogger serviceLogger, boolean enabled, boolean missingRubricItem) {
-        String url = "";
-        if (checkstyleUrlField.getText() != null) {
-            url = checkstyleUrlField.getText().trim();
-        }
+        return createReportDependencies(
+                serviceLogger,
+                mappingService,
+                checkstyleService,
+                unitTestService,
+                gradingDraftService,
+                sourceCodeService,
+                gitService,
+                reportHtmlWrapper,
+                selectedRootPath,
+                enabled,
+                missingRubricItem,
+                checkstyleUrlField.getText()
+        );
+    }
 
+    static MainWindowReportDependencies createReportDependencies(
+            ServiceLogger serviceLogger,
+            MappingService mappingService,
+            CheckstyleService checkstyleService,
+            UnitTestService unitTestService,
+            GradingDraftService gradingDraftService,
+            SourceCodeService sourceCodeService,
+            GitService gitService,
+            ReportHtmlWrapper reportHtmlWrapper,
+            Path selectedRootPath,
+            boolean enabled,
+            boolean missingRubricItem,
+            String checkstyleUrl) {
+        String normalizedUrl = "";
+        if (checkstyleUrl != null) {
+            normalizedUrl = checkstyleUrl.trim();
+        }
         return new MainWindowReportDependencies(
                 serviceLogger,
                 mappingService,
@@ -843,7 +854,7 @@ public class MainWindowController implements Initializable {
                 selectedRootPath,
                 enabled,
                 missingRubricItem,
-                url
+                normalizedUrl
         );
     }
 
@@ -988,18 +999,7 @@ public class MainWindowController implements Initializable {
 
     private void normalizeExpectedFiles(Assignment a) {
         if (a != null && a.getExpectedFiles() != null) {
-            List<String> cleaned = new ArrayList<>();
-            for (String s : a.getExpectedFiles()) {
-                if (s == null) {
-                    continue;
-                }
-                String name = Path.of(s).getFileName().toString().trim();
-                if (!name.isEmpty() && !cleaned.contains(name)) {
-                    cleaned.add(name);
-                }
-            }
-            cleaned.sort(String::compareTo);
-            a.setExpectedFiles(cleaned);
+            a.setExpectedFiles(normalizedExpectedFiles(a.getExpectedFiles()));
         }
     }
 
@@ -1086,24 +1086,7 @@ public class MainWindowController implements Initializable {
     }
 
     private boolean selectedAssignmentMissingCheckstyleRubricItem() {
-        Assignment assignment = assignmentCombo.getValue();
-        if (assignment == null) {
-            return true;
-        }
-        if (assignment.getRubric() == null || assignment.getRubric().getItems() == null) {
-            return true;
-        }
-        if (assignmentsFile == null || assignmentsFile.getRubricItemLibrary() == null) {
-            return true;
-        }
-        for (RubricItemRef ref : assignment.getRubric().getItems()) {
-            String id = ref.getRubricItemId();
-            RubricItemDef def = assignmentsFile.getRubricItemLibrary().get(id);
-            if (def != null && def.isCheckstyleItem()) {
-                return false;
-            }
-        }
-        return true;
+        return isAssignmentMissingCheckstyleRubricItem(assignmentCombo.getValue(), assignmentsFile);
     }
 
     // ============================================================
@@ -1111,25 +1094,271 @@ public class MainWindowController implements Initializable {
     // ============================================================
 
     private boolean isSelectedAssignmentRubricValid() {
-        boolean valid = false;
+        return isAssignmentRubricValid(assignmentCombo.getValue());
+    }
 
-        Assignment selected = assignmentCombo.getValue();
-        if (selected != null
-                && selected.getRubric() != null
-                && selected.getRubric().getItems() != null) {
+    static UiState evaluateUiState(String cloneCommand,
+                                   Path rootPath,
+                                   Assignment selectedAssignment,
+                                   boolean checkstyleEnabled,
+                                   String checkstyleUrl,
+                                   boolean hasAssignmentsLoaded) {
+        boolean hasCloneCommand = cloneCommand != null && !cloneCommand.trim().isEmpty();
+        boolean hasRootPath = rootPath != null;
+        boolean hasAssignment = selectedAssignment != null;
+        boolean hasCheckstyleUrl = checkstyleUrl != null && !checkstyleUrl.trim().isEmpty();
+        boolean checkstyleReady = !checkstyleEnabled || hasCheckstyleUrl;
+        boolean rubricValid = isAssignmentRubricValid(selectedAssignment);
 
-            int totalPoints = 0;
-            for (model.RubricItemRef itemRef : selected.getRubric().getItems()) {
-                totalPoints += itemRef.getPoints();
+        boolean canExtract = hasRootPath && hasAssignment && rubricValid;
+        boolean canReports = hasRootPath && hasAssignment && rubricValid && checkstyleReady;
+        boolean canRunAll = hasCloneCommand && hasAssignment && rubricValid && checkstyleReady;
+
+        return new UiState(
+                hasCloneCommand,
+                canExtract,
+                canExtract,
+                canReports,
+                canRunAll,
+                hasAssignment,
+                hasAssignment,
+                hasRootPath && hasAssignment,
+                hasAssignmentsLoaded
+        );
+    }
+
+    static List<String> normalizedExpectedFiles(List<String> rawFiles) {
+        List<String> cleaned = new ArrayList<>();
+        if (rawFiles == null) {
+            return cleaned;
+        }
+        for (String rawFile : rawFiles) {
+            if (rawFile == null) {
+                continue;
             }
-
-            final int expectedPoints = 100;
-            if (totalPoints == expectedPoints) {
-                valid = true;
+            String fileName = Path.of(rawFile).getFileName().toString().trim();
+            if (!fileName.isEmpty() && !cleaned.contains(fileName)) {
+                cleaned.add(fileName);
             }
         }
+        cleaned.sort(String::compareTo);
+        return cleaned;
+    }
 
-        return valid;
+    static boolean isAssignmentMissingCheckstyleRubricItem(Assignment assignment,
+                                                           AssignmentsFile file) {
+        if (assignment == null || assignment.getRubric() == null
+                || assignment.getRubric().getItems() == null) {
+            return true;
+        }
+        if (file == null || file.getRubricItemLibrary() == null) {
+            return true;
+        }
+        for (RubricItemRef ref : assignment.getRubric().getItems()) {
+            String id = ref.getRubricItemId();
+            RubricItemDef def = file.getRubricItemLibrary().get(id);
+            if (def != null && def.isCheckstyleItem()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static boolean isAssignmentRubricValid(Assignment assignment) {
+        if (assignment == null
+                || assignment.getRubric() == null
+                || assignment.getRubric().getItems() == null) {
+            return false;
+        }
+        int totalPoints = 0;
+        for (RubricItemRef itemRef : assignment.getRubric().getItems()) {
+            totalPoints += itemRef.getPoints();
+        }
+        return totalPoints == RUBRIC_EXPECTED_TOTAL;
+    }
+
+    static Runnable buildIoWorker(IoAction action,
+                                  String successMessage,
+                                  String failurePrefix,
+                                  ServiceLogger serviceLogger,
+                                  Runnable uiUpdateAction) {
+        return () -> {
+            try {
+                try {
+                    action.run();
+                    serviceLogger.log(successMessage);
+                } catch (IOException e) {
+                    serviceLogger.log(failurePrefix + e.getMessage());
+                }
+            } finally {
+                uiUpdateAction.run();
+            }
+        };
+    }
+
+    static String startPullIfParsable(String rawCommand,
+                                      Path rootPath,
+                                      ProcessRunner processRunner,
+                                      ServiceLogger outputLogger,
+                                      PullExitHandler exitHandler,
+                                      ThreadStarter threadStarter) {
+        List<String> args = parsePullArgs(rawCommand, processRunner);
+        if (args.isEmpty()) {
+            return "Pull aborted: Could not parse command.";
+        }
+        Runnable workerAction = buildPullWorkerAction(
+                args,
+                rootPath,
+                processRunner,
+                outputLogger,
+                exitHandler
+        );
+        threadStarter.start("pull-worker", workerAction);
+        return null;
+    }
+
+    static List<String> parsePullArgs(String rawCommand, ProcessRunner processRunner) {
+        return processRunner.tokenizeCommand(rawCommand.trim());
+    }
+
+    static Runnable buildPullWorkerAction(List<String> args,
+                                          Path rootPath,
+                                          ProcessRunner processRunner,
+                                          ServiceLogger outputLogger,
+                                          PullExitHandler exitHandler) {
+        return () -> {
+            int exitCode = processRunner.runAndLog(args, rootPath, outputLogger::log);
+            exitHandler.onExit(exitCode);
+        };
+    }
+
+    static String startRunAllIfValid(Path rootPath,
+                                     Assignment assignment,
+                                     boolean rubricValid,
+                                     String cloneCommand,
+                                     Runnable disableMenusAction,
+                                     RunAllWorkerInvoker runAllWorkerInvoker,
+                                     ThreadStarter threadStarter) {
+        String abortReason = runAllAbortReason(rootPath, assignment, rubricValid, cloneCommand);
+        if (abortReason != null) {
+            return abortReason;
+        }
+        disableMenusAction.run();
+        Runnable workerAction = () -> runAllWorkerInvoker.run(cloneCommand, assignment, rootPath);
+        threadStarter.start("runall-worker", workerAction);
+        return null;
+    }
+
+    static void startDaemonThread(String name, Runnable action) {
+        Thread worker = new Thread(action, name);
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    static String pullAbortReason(String cloneCommand, Path rootPath) {
+        if (cloneCommand == null || cloneCommand.trim().isEmpty()) {
+            return "Pull aborted: GitHub Classroom command is empty.";
+        }
+        if (rootPath == null) {
+            return "Pull aborted: Repository root is not set.";
+        }
+        return null;
+    }
+
+    static String extractAbortReason(Path rootPath, Assignment assignment) {
+        if (rootPath == null) {
+            return "Extract aborted: Repository root is not set.";
+        }
+        if (assignment == null) {
+            return "Extract aborted: No assignment selected.";
+        }
+        return null;
+    }
+
+    static String importsAbortReason(Path rootPath, Assignment assignment) {
+        if (rootPath == null) {
+            return "Generate Imports aborted: Repository root is not set.";
+        }
+        if (assignment == null) {
+            return "Generate Imports aborted: No assignment selected.";
+        }
+        return null;
+    }
+
+    static String reportsAbortReason(Path rootPath,
+                                     Assignment assignment,
+                                     boolean rubricValid) {
+        if (rootPath == null) {
+            return "Generate Reports aborted: Repository root is not set.";
+        }
+        if (!Files.exists(rootPath) || !Files.isDirectory(rootPath)) {
+            return "Generate Reports aborted: Repository root does not exist or "
+                    + "is not a directory.";
+        }
+        if (assignment == null) {
+            return "Generate Reports aborted: No assignment selected.";
+        }
+        if (!rubricValid) {
+            return "Generate Reports aborted: Rubric total must be exactly 100 points.";
+        }
+        return null;
+    }
+
+    static String runAllAbortReason(Path rootPath,
+                                    Assignment assignment,
+                                    boolean rubricValid,
+                                    String cloneCommand) {
+        if (rootPath == null) {
+            return "Run All aborted: Repository root is not set.";
+        }
+        if (assignment == null) {
+            return "Run All aborted: No assignment selected.";
+        }
+        if (!rubricValid) {
+            return "Run All aborted: Rubric total must be exactly 100 points.";
+        }
+        if (cloneCommand == null || cloneCommand.trim().isEmpty()) {
+            return "Run All aborted: GitHub Classroom command is empty.";
+        }
+        return null;
+    }
+
+    record UiState(boolean pullEnabled,
+                   boolean extractEnabled,
+                   boolean importsEnabled,
+                   boolean reportsEnabled,
+                   boolean runAllEnabled,
+                   boolean editAssignmentEnabled,
+                   boolean deleteAssignmentEnabled,
+                   boolean gradeAssignmentEnabled,
+                   boolean exportAssignmentsEnabled) {
+    }
+
+    @FunctionalInterface
+    interface IoAction {
+        void run() throws IOException;
+    }
+
+    @FunctionalInterface
+    interface ThreadStarter {
+        void start(String name, Runnable action);
+    }
+
+    @FunctionalInterface
+    interface PullExitHandler {
+        void onExit(int exitCode);
+    }
+
+    @FunctionalInterface
+    interface RunAllWorkerInvoker {
+        void run(String cloneCmd, Assignment assignment, Path root);
+    }
+
+    @FunctionalInterface
+    interface UiScheduler extends Consumer<Runnable> {
+        default void runLater(Runnable action) {
+            accept(action);
+        }
     }
 
     public UnitTestService getUnitTestService() {

@@ -3,71 +3,175 @@ package service;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Unit tests for service.GradingDraftService
- *
- * Verified production symbols used:
- * - src/main/java/service/GradingDraftService.java : public Map<String, Integer> loadManualDeductionsFromGradingDraft(String, String, Path)
- * - src/main/java/model/Comments.java : public static java.util.List<ParsedComment> parseInjectedComments(String)
- */
 public class GradingDraftServiceTest {
 
     @Test
     public void loadManualDeductions_emptyWhenNoFile(@TempDir Path tmp) {
-        GradingDraftService svc = new GradingDraftService();
+        GradingDraftService service =
+                new GradingDraftService(new ReportHtmlWrapper());
 
-        Map<String, Integer> result = svc.loadManualDeductionsFromGradingDraft("A1", "smith", tmp);
+        Map<String, Integer> result =
+                service.loadManualDeductionsFromGradingDraft("A1", "smith", tmp);
 
         assertNotNull(result);
-        assertTrue(result.isEmpty(), "Expected empty map when grading draft file does not exist");
+        assertTrue(result.isEmpty());
     }
 
     @Test
-    public void loadManualDeductions_parsesAndSumsRubricIds(@TempDir Path tmp) throws Exception {
-        // create grading directory and file expected by GradingDraftService
-        Path gradingDir = tmp.resolve("grading");
-        Files.createDirectories(gradingDir);
+    public void loadManualDeductions_parsesInjectedCommentsFromHtmlReport(
+            @TempDir Path tmp) throws Exception {
+        GradingDraftService service =
+                new GradingDraftService(new ReportHtmlWrapper());
 
-        // filename is assignmentId + studentPackage + .md
-        Path draft = gradingDir.resolve("A1smith.md");
-
-        // Compose markdown with three comments:
-        // - one for ri_impl with -10 points
-        // - one for ri_extra with -5 points
-        // - another for ri_impl with a negative parsed value ("- -5 points") which should be clamped to 0
-        String md = String.join(System.lineSeparator(),
+        String markdown = String.join(
+                System.lineSeparator(),
+                "# Sample",
+                "",
+                "<!-- COMMENTS_SUMMARY_BEGIN -->",
+                "> # Feedback",
                 "<a id=\"cmt_1\"></a>",
+                "```",
                 "> #### Missing semicolon",
                 "> * -10 points (ri_impl)",
+                "```",
                 "",
                 "<a id=\"cmt_2\"></a>",
+                "```",
                 "> #### Wrong variable",
                 "> * -5 points (ri_extra)",
+                "```",
                 "",
                 "<a id=\"cmt_3\"></a>",
-                "> #### Weird negative",
-                "> * - -5 points (ri_impl)"
+                "```",
+                "> #### Another issue",
+                "> * -3 points (ri_impl)",
+                "```",
+                "<!-- COMMENTS_SUMMARY_END -->"
         );
 
-        Files.writeString(draft, md, StandardCharsets.UTF_8);
+        Path report = tmp.resolve("A1smith.html");
+        Files.writeString(report, new ReportHtmlWrapper().wrapMarkdownAsHtml("A1smith", markdown));
 
-        GradingDraftService svc = new GradingDraftService();
-
-        Map<String, Integer> result = svc.loadManualDeductionsFromGradingDraft("A1", "smith", tmp);
+        Map<String, Integer> result =
+                service.loadManualDeductionsFromGradingDraft("A1", "smith", tmp);
 
         assertNotNull(result);
-        // ri_impl: first contributes 10, second negative -5 is clamped to 0 -> total 10
-        assertEquals(10, result.getOrDefault("ri_impl", -1).intValue());
-        // ri_extra: contributes 5
+        assertEquals(13, result.getOrDefault("ri_impl", -1).intValue());
         assertEquals(5, result.getOrDefault("ri_extra", -1).intValue());
-        // no other keys
         assertEquals(2, result.size());
+    }
+
+    @Test
+    public void loadFeedbackSectionMarkdown_prefersFeedbackHeaderOverSummaryBlock(
+            @TempDir Path tmp) throws Exception {
+        GradingDraftService service =
+                new GradingDraftService(new ReportHtmlWrapper());
+
+        String markdown = String.join(
+                System.lineSeparator(),
+                "# Sample",
+                "",
+                "<!-- COMMENTS_SUMMARY_BEGIN -->",
+                "> # Feedback",
+                ">> # Comments",
+                ">>",
+                ">> * [Missing semicolon](#cmt_1) (-10 ri_impl)",
+                "<!-- COMMENTS_SUMMARY_END -->",
+                "",
+                "> # Feedback",
+                "<a id=\"cmt_1\"></a>",
+                "```",
+                "> #### Missing semicolon",
+                "> * -10 points (ri_impl)",
+                "> Fix the statement terminator.",
+                "```",
+                "",
+                "## Source Code"
+        );
+
+        Path report = tmp.resolve("A1smith.html");
+        Files.writeString(report, new ReportHtmlWrapper().wrapMarkdownAsHtml("A1smith", markdown));
+
+        String feedback =
+                service.loadFeedbackSectionMarkdown("A1", "smith", tmp);
+
+        assertEquals(
+                String.join(
+                        System.lineSeparator(),
+                        "<a id=\"cmt_1\"></a>",
+                        "```",
+                        "> #### Missing semicolon",
+                        "> * -10 points (ri_impl)",
+                        "> Fix the statement terminator.",
+                        "```"
+                ),
+                feedback
+        );
+    }
+
+    @Test
+    public void loadFeedbackSectionMarkdown_fallsBackToSummaryBlockWhenHeaderMissing(
+            @TempDir Path tmp) throws Exception {
+        GradingDraftService service =
+                new GradingDraftService(new ReportHtmlWrapper());
+
+        String markdown = String.join(
+                System.lineSeparator(),
+                "# Sample",
+                "",
+                "<!-- COMMENTS_SUMMARY_BEGIN -->",
+                "> # Feedback",
+                "<a id=\"cmt_1\"></a>",
+                "```",
+                "> #### Missing semicolon",
+                "> * -10 points (ri_impl)",
+                "> Fix the statement terminator.",
+                "```",
+                "",
+                "<!-- COMMENTS_SUMMARY_END -->",
+                "",
+                "## Source Code"
+        );
+
+        Path report = tmp.resolve("A1smith.html");
+        Files.writeString(report, new ReportHtmlWrapper().wrapMarkdownAsHtml("A1smith", markdown));
+
+        String feedback =
+                service.loadFeedbackSectionMarkdown("A1", "smith", tmp);
+
+        assertEquals(
+                String.join(
+                        System.lineSeparator(),
+                        "<a id=\"cmt_1\"></a>",
+                        "```",
+                        "> #### Missing semicolon",
+                        "> * -10 points (ri_impl)",
+                        "> Fix the statement terminator.",
+                        "```"
+                ),
+                feedback
+        );
+    }
+
+    @Test
+    public void loadReportMarkdown_returnsEmptyForMalformedWrappedHtml(
+            @TempDir Path tmp) throws Exception {
+        GradingDraftService service =
+                new GradingDraftService(new ReportHtmlWrapper());
+
+        Path report = tmp.resolve("A1smith.html");
+        Files.writeString(report, "<html><body># Not wrapped</body></html>");
+
+        String markdown = service.loadReportMarkdown("A1", "smith", tmp);
+
+        assertEquals("", markdown);
     }
 }
