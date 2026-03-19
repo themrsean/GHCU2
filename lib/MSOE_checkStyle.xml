@@ -1,0 +1,233 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+        "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+        "https://checkstyle.org/dtds/configuration_1_3.dtd">
+<module name="Checker">
+    <!--
+        If you set the basedir property below, then all reported file
+        names will be relative to the specified directory. See
+        http://checkstyle.sourceforge.net/5.x/config.html#Checker
+        <property name="basedir" value="${basedir}"/>
+    -->
+    <module name="BeforeExecutionExclusionFileFilter">
+        <property name="fileNamePattern" value=".*[\\/]src[\\/]test[\\/].*"/>
+    </module>
+    <module name="BeforeExecutionExclusionFileFilter">
+      <property name="fileNamePattern"
+        value=".*[\\/].idea[\\/].*$"/>
+    </module>
+    <module name="BeforeExecutionExclusionFileFilter">
+      <property name="fileNamePattern"
+        value=".*[\\/]gradle[\\/].*$"/>
+    </module>
+    <module name="BeforeExecutionExclusionFileFilter">
+      <property name="fileNamePattern"
+        value=".*[\\/]build[\\/].*$"/>
+    </module>
+    <module name="BeforeExecutionExclusionFileFilter">
+      <property name="fileNamePattern"
+        value=".*[\\/].gradle[\\/].*$"/>
+    </module>
+    <property name="fileExtensions" value="java, properties, xml"/>
+    <!-- See http://checkstyle.sf.net/config_sizes.html -->
+    <module name="FileLength">
+        <property name="max" value="2500"/>
+    </module>
+		
+		
+	<!-- These checks must be done outside the TreeWalker   -->
+	<!-- Checks File Header -->
+	<module name="RegexpHeader"> 
+   		<property name="header" value= "/\*\n\* Course: "/> 
+   	</module> 
+   	<!-- Limits line length to 100 characters -->
+   	<module name="LineLength">
+		<property name="max" value="100"/>
+	</module>
+	<!-- Checks there are no tabs (\t) in the source code -->
+    <module name="FileTabCharacter"/>	
+
+    <module name="TreeWalker">
+        <!-- Make the @SuppressWarnings annotations available to Checkstyle -->
+        <module name="SuppressionCommentFilter">
+            <property name="offCommentFormat" value="CHECKSTYLE:OFF"/>
+            <property name="onCommentFormat" value="CHECKSTYLE:ON"/>
+            <property name="checkFormat" value="MagicNumber|LineLength"/>
+        </module>
+    	<!-- Checks Annotations                              -->
+    	<module name="AnnotationLocation"/>
+    	<module name="MissingOverride"/>
+    	
+    	
+    	<!-- Checks for blocks. You know, those {}'s         -->
+        <module name="AvoidNestedBlocks"/>
+        <module name="EmptyBlock"/>
+        <module name="EmptyCatchBlock"/>
+        <module name="LeftCurly"/>
+        <module name="NeedBraces"/>
+        <module name="RightCurly"/>
+        
+        
+        <!-- Class Design                                    -->
+        <module name="ModifierOrder"/>
+        <module name="InterfaceIsType"/>
+		<module name="OneTopLevelClass"/>
+		<module name="VisibilityModifier">
+   			<property name="protectedAllowed" value="true"/>
+ 		</module>
+        
+        
+        <!-- Checks Coding                                   -->
+        <module name="AvoidDoubleBraceInitialization"/>
+        <!-- <module name="AvoidNoArgumentSuperConstructorCall"/> -->
+        <module name="CovariantEquals"/>
+        <module name="DeclarationOrder"/>
+        <module name="DefaultComesLast"/>
+        <module name="EmptyStatement"/>
+		<module name="IllegalCatch"/>
+        <module name="IllegalInstantiation"/>
+		<module name="IllegalThrows"/>
+        <module name="IllegalToken">
+            <property name="tokens" value="LITERAL_BREAK"/>
+        </module>
+        <module name="ReturnCountCheck">
+            <property name="maxForVoid" value="0"/> 
+            <property name="max" value="5"/>
+        </module>
+        <!-- Removed InnerAssignment to allow for switch expressions -->
+        
+        <module name="MagicNumber">
+			<property name="ignoreNumbers" value="-1, 0, 1, 2, 3, 4"/>
+			<property name="ignoreAnnotation" value="true"/>
+		</module>
+		<module name="ModifiedControlVariable"/>
+		<module name="MultipleVariableDeclarations"/>
+		<module name="PackageDeclaration"/>
+        <module name="SimplifyBooleanExpression"/>
+        <module name="SimplifyBooleanReturn"/>
+        <module name="StringLiteralEquality"/>
+		<module name="UnnecessaryParentheses"/>
+		<module name="UnnecessarySemicolonInTryWithResources"/>
+		<module name="UnusedLocalVariable"/>
+		
+		<!-- Checks for imports                              -->
+        <!-- See http://checkstyle.sf.net/config_import.html -->
+        <module name="AvoidStarImport"/>
+        <module name="AvoidStaticImport"/>
+        <module name="IllegalImport"> <!-- defaults to sun.* packages -->
+
+        </module>
+        <module name="RedundantImport"/>
+        <module name="UnusedImports">
+            <property name="processJavadoc" value="false"/>
+        </module>
+		
+		
+        <!-- Checks for Javadoc comments.                     -->
+		<module name="AtclauseOrder">
+			<property name="tagOrder" value="@author, @version, @param, @return, @throws, 
+			@exception, @see, @since, @serial, @serialField, @serialData, @deprecated"/>
+		</module>
+		<module name="InvalidJavadocPosition"/>
+		<module name="JavadocContentLocationCheck"/>
+		<module name="JavadocMethod">
+			<property name="accessModifiers" value="public, protected"/>
+			<property name="allowedAnnotations" value=" "/>
+			<property name="validateThrows" value="true"/>
+		</module>
+        <module name="JavadocStyle">
+			<property name="checkFirstSentence" value="false"/>	
+			<property name="checkEmptyJavadoc" value="true"/>		
+		</module>
+        <module name="JavadocType"/>
+        <module name="JavadocVariable">
+			<property name="accessModifiers" value="public"/>
+		</module>
+		<module name="MissingJavadocMethod">
+			<property name="allowMissingPropertyJavadoc" value="true"/>
+			<property name="ignoreMethodNamesRegex" value="main|start"/>
+		</module>
+		<module name="MissingJavadocType"/>
+
+
+        <!-- Miscellaneous other checks.                   -->
+        <module name="ArrayTypeStyle"/>
+        <module name="CommentsIndentation"/>
+		<module name="Indentation">
+			<property name="arrayInitIndent" value="8"/>
+			<property name="lineWrappingIndentation" value="8"/>
+		</module>
+        <module name="OuterTypeFilename"/>
+		<module name="TodoComment">
+   			<property name="format" value="(TODO)|(FIXME)"/>
+		</module>
+        <module name="UpperEll"/>
+		
+        <!-- Modifier checks.                              -->
+		<module name="ModifierOrder"/>
+		<module name="RedundantModifier"/>
+		
+		<module name="RegexpSinglelineJava">
+  			<property name="format" value="   e\.printStackTrace\(\);"/>
+  			<property name="ignoreComments" value="true"/>
+		</module>
+		<module name="RegexpSinglelineJava">
+  			<property name="format" value="\* Created by [a-zA-Z 0-9]+ on [0-9]{1,2}/[0-9]{1,2}/[0-9]{4}\."/>
+			<property name="message" value="Autogenerated class comment"/>
+		</module>
+        <module name="RegexpSinglelineJava">
+            <property name="format" value="while\s*\(\s*true\s*\)"/>
+            <property name="message" value="Avoid using 'while(true)'. Consider using a proper loop condition"/>
+        </module>
+
+        <!-- Checks for Naming Conventions.                  -->
+        <module name="CatchParameterName"/>
+        <module name="ClassTypeParameterName"/>
+        <module name="ConstantName"/>
+        <module name="InterfaceTypeParameterName"/>
+        <module name="LambdaParameterName">
+            <property name="format" value="^([a-z]|_)[a-zA-Z0-9]*$"/>
+        </module>
+        <module name="LocalFinalVariableName"/>
+        <module name="LocalVariableName"/>
+        <module name="MemberName"/>
+        <module name="MethodName"/>
+        <module name="MethodTypeParameterName"/>
+        <module name="PackageName">
+            <property name="format" value="^[a-z]([a-z0-9]*)(\.[a-z]([a-z0-9]*))*$"/>
+        </module>
+        <module name="ParameterName"/>
+        <module name="PatternVariableName"/>
+        <module name="RecordComponentName"/>
+        <module name="RecordTypeParameterName"/>
+        <module name="StaticVariableName"/>
+        <module name="TypeName"/>
+        
+        
+        <!-- Checks for Size Violations.                    -->
+        <module name="AnonInnerLength">
+        	<property name="max" value="40"/>
+        </module>
+        <module name="MethodLength"/>
+        <module name="ParameterNumber"/>
+		<module name="RecordComponentNumber"/>
+
+
+        <!-- Checks for whitespace                               -->
+        <module name="GenericWhitespace"/>
+        <module name="MethodParamPad"/>
+        <module name="NoWhitespaceAfter"/>
+        <module name="NoWhitespaceBefore"/>
+        <module name="NoWhitespaceBeforeCaseDefaultColon"/>
+        <module name="ParenPad"/>
+		<module name="SingleSpaceSeparator"/>
+		<module name="TypecastParenPad"/>
+		<module name="WhitespaceAfter">
+			<property name="tokens" value="COMMA, SEMI"/>
+		</module>
+		<module name="WhitespaceAround">
+			<property name="tokens" value="ASSIGN, ARRAY_INIT, DIV_ASSIGN, MINUS_ASSIGN, MOD_ASSIGN, 
+			PLUS_ASSIGN, QUESTION, LCURLY, RCURLY, STAR_ASSIGN"/>
+		</module>
+    </module>
+</module>

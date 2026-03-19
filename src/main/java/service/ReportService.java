@@ -12,10 +12,7 @@ import model.RubricTableBuilder;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 
 public class ReportService {
 
@@ -49,9 +46,10 @@ public class ReportService {
             return new ReportGenerationResult(false, false);
         }
 
-        String assignmentId = assignment.getCourseCode() + assignment.getAssignmentCode();
-
+        final String assignmentId = assignment.getCourseCode() + assignment.getAssignmentCode();
         final String packagesFolderName = "packages";
+        final String reportExtension = ".html";
+
         Path packagesRoot = selectedRootPath.resolve(packagesFolderName);
 
         if (!Files.exists(packagesRoot) || !Files.isDirectory(packagesRoot)) {
@@ -77,8 +75,6 @@ public class ReportService {
         packageNames.sort(String::compareTo);
 
         deps.log("Generating reports for " + packageNames.size() + " student package(s).");
-
-        final String reportExtension = ".html";
 
         for (String pkg : packageNames) {
 
@@ -116,7 +112,8 @@ public class ReportService {
             Path reportPath = repoRoot.resolve(reportFileName);
 
             try {
-                String html = buildReportHtml(assignment, pkg, repoRoot);
+                String markdown = buildReportMarkdown(assignment, pkg, repoRoot);
+                String html = deps.wrapMarkdownAsHtml(reportFileName, markdown);
 
                 Files.deleteIfExists(reportPath);
                 Files.writeString(reportPath, html);
@@ -135,11 +132,12 @@ public class ReportService {
         return new ReportGenerationResult(wroteAny, hadFailures);
     }
 
-    private String buildReportHtml(Assignment assignment,
-                                   String studentPackage,
-                                   Path repoPath) {
+    private String buildReportMarkdown(Assignment assignment,
+                                       String studentPackage,
+                                       Path repoPath) {
 
-        String assignmentId = assignment.getCourseCode() + assignment.getAssignmentCode();
+        final String newline = System.lineSeparator();
+        final String assignmentId = assignment.getCourseCode() + assignment.getAssignmentCode();
 
         CheckstyleService.CheckstyleResult cs = deps.buildCheckstyleResult(repoPath);
 
@@ -153,61 +151,61 @@ public class ReportService {
                         repoPath
                 );
 
-        String md =
-                "# "
-                        + assignment.getCourseCode()
+        String feedbackMarkdown =
+                deps.loadFeedbackSectionMarkdown(
+                        assignmentId,
+                        studentPackage,
+                        repoPath
+                );
+
+        if (feedbackMarkdown == null || feedbackMarkdown.isBlank()) {
+            feedbackMarkdown = "> * No feedback provided";
+        }
+
+        String title =
+                assignment.getCourseCode()
                         + " "
                         + assignment.getAssignmentCode()
                         + " - "
-                        + assignment.getAssignmentName()
-                        + System.lineSeparator()
-                        + System.lineSeparator()
+                        + assignment.getAssignmentName();
 
-                        + "## Rubric"
-                        + System.lineSeparator()
-                        + System.lineSeparator()
-
-                        + RubricTableBuilder.buildRubricMarkdown(
+        String rubricTableMarkdown =
+                RubricTableBuilder.buildRubricMarkdown(
                         assignment,
                         assignmentsFile,
                         cs.totalViolations(),
                         (double) ut.failedTests(),
                         ut.totalTests(),
                         manualDeductions
-                )
-                        + System.lineSeparator()
-                        + System.lineSeparator()
+                );
 
-                        + "## Source Code"
-                        + System.lineSeparator()
-                        + System.lineSeparator()
-                        + deps.buildSourceCodeMarkdown(assignment, studentPackage, repoPath)
-                        + System.lineSeparator()
-                        + System.lineSeparator()
+        return
+                "# " + title + newline + newline +
 
-                        + "## Checkstyle Violations"
-                        + System.lineSeparator()
-                        + System.lineSeparator()
-                        + cs.markdown()
-                        + System.lineSeparator()
-                        + System.lineSeparator()
+                        "<!-- RUBRIC_TABLE_BEGIN -->" + newline +
+                        rubricTableMarkdown + newline +
+                        "<!-- RUBRIC_TABLE_END -->" + newline + newline +
 
-                        + "## Failed Unit Tests"
-                        + System.lineSeparator()
-                        + System.lineSeparator()
-                        + ut.markdown()
-                        + System.lineSeparator()
-                        + System.lineSeparator()
+                        "<!-- COMMENTS_SUMMARY_BEGIN -->" + newline +
+                        "> # Feedback" + newline +
+                        feedbackMarkdown + newline + newline +
+                        "<!-- COMMENTS_SUMMARY_END -->" + newline + newline +
 
-                        + "## Commit History (Last 10)"
-                        + System.lineSeparator()
-                        + System.lineSeparator()
-                        + deps.buildCommitHistoryMarkdown(repoPath)
-                        + System.lineSeparator();
+                        "## Source Code" + newline + newline +
+                        deps.buildSourceCodeMarkdown(assignment, studentPackage, repoPath)
+                        + newline + newline +
 
-        String title = assignmentId + studentPackage;
+                        "## Checkstyle Violations" + newline + newline +
+                        cs.markdown()
+                        + newline + newline +
 
-        return deps.wrapMarkdownAsHtml(title, md);
+                        "## Failed Unit Tests" + newline + newline +
+                        ut.markdown()
+                        + newline + newline +
+
+                        "## Commit History (Last 10)" + newline + newline +
+                        deps.buildCommitHistoryMarkdown(repoPath)
+                        + newline;
     }
 
     public record ReportGenerationResult(boolean wroteAny, boolean hadFailures) {
@@ -232,6 +230,11 @@ public class ReportService {
                 Path repoPath);
 
         Map<String, Integer> loadManualDeductionsFromGradingDraft(
+                String assignmentId,
+                String studentPackage,
+                Path rootPath);
+
+        String loadFeedbackSectionMarkdown(
                 String assignmentId,
                 String studentPackage,
                 Path rootPath);

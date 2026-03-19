@@ -13,7 +13,6 @@ public class AppDataUtil {
     private static Path appDataDir() {
         String home = System.getProperty("user.home");
         String os = System.getProperty("os.name").toLowerCase();
-
         Path base;
         if (os.contains("mac")) {
             base = Path.of(home, "Library", "Application Support");
@@ -26,6 +25,4 @@ public class AppDataUtil {
         }
         return base.resolve("GHCU2"); // app folder name
     }
-
-
 }

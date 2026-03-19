@@ -51,10 +51,12 @@ When writing or modifying tests, the agent must:
     - Identify edge cases
     - Identify failure modes
     - Identify required fixtures or temp directories
+    - Identify private classes that will need Reflection to access
 
 3) Create or patch test files:
     - Use `write_file` for new test classes
     - Use `apply_patch` for modifications to existing test files
+    - Do not create new test files for classes if there is an existing test file
 
 4) Validate:
     - `compile_prod`

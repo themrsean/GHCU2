@@ -41,6 +41,8 @@ import model.Comments.CommentDef;
 import model.Comments.CommentsLibrary;
 import model.Comments.CommentsStore;
 import model.Comments.ParsedComment;
+import service.GradingDraftService;
+import service.ReportHtmlWrapper;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -76,7 +78,7 @@ public class GradingWindowController {
     private static final String RUBRIC_TABLE_END = "<!-- RUBRIC_TABLE_END -->";
     private static final String COMMENT_ANCHOR_PREFIX = "cmt_";
     // --- Syntax highlighting (Java) ---
-    private static final String[] KEYWORDS = new String[]{
+    private static final String[] KEYWORDS = new String[] {
             "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class",
             "const", "continue", "default", "do", "double", "else", "enum", "extends", "final",
             "finally", "float", "for", "goto", "if", "implements", "import", "instanceof", "int",
@@ -125,6 +127,9 @@ public class GradingWindowController {
     private final CommentsStore commentsStore = new CommentsStore();
     private CommentsLibrary commentLibrary;
     private final Path commentsPath = appDataDir().resolve("comments.json");
+    private final ReportHtmlWrapper reportHtmlWrapper = new ReportHtmlWrapper();
+    private final GradingDraftService gradingDraftService =
+            new GradingDraftService(reportHtmlWrapper);
 
     private AssignmentsFile assignmentsFile;
     private Assignment assignment;
@@ -726,48 +731,23 @@ public class GradingWindowController {
     /**
      * Load order:
      * 1) repo report: {assignmentId}{pkg}.html (extract <xmp/>)
-     * 2) grading/{assignmentId}{pkg}.md (drafts)
-     * 3) fallback skeleton
+     * 2) fallback skeleton
      */
     private String loadInitialMarkdownForStudent(String studentPackage) {
-        // ---- (1) generated HTML in the mapped repo ----
-        try {
-            Path repoDir = findRepoDirForStudentPackage(studentPackage);
-            if (repoDir != null) {
-                String fileName = assignmentId + studentPackage + ".html";
-                Path htmlPath = repoDir.resolve(fileName);
-                if (Files.exists(htmlPath) && Files.isRegularFile(htmlPath)) {
-                    String html = Files.readString(htmlPath, StandardCharsets.UTF_8);
-                    String md = extractXmpMarkdown(html);
-
-                    if (md != null && !md.isBlank()) {
-                        return ensurePatchCSectionsExist(md, studentPackage);
-                    }
-                }
-            }
-        } catch (IOException e) {
-            status("Could not load student package " + studentPackage);
-        }
-
-
-        // ---- (2) markdown draft in repo ----
         Path repoDir = findRepoDirForStudentPackage(studentPackage);
-        if (repoDir != null) {
-            Path draftMd = repoDir.resolve(assignmentId + studentPackage + ".md");
 
-            if (Files.exists(draftMd) && Files.isRegularFile(draftMd)) {
-                try {
-                    String draft = Files.readString(draftMd, StandardCharsets.UTF_8);
-                    if (!draft.trim().isEmpty()) {
-                        return draft;
-                    }
-                } catch (IOException e) {
-                    return "_Failed to read draft markdown: " + e.getMessage() + "_";
-                }
+        if (repoDir != null) {
+            String markdown = gradingDraftService.loadReportMarkdown(
+                    assignmentId,
+                    studentPackage,
+                    repoDir
+            );
+
+            if (!markdown.isBlank()) {
+                return ensurePatchCSectionsExist(markdown, studentPackage);
             }
         }
 
-        // ---- (3) fallback skeleton ----
         return buildFreshReportSkeleton(studentPackage);
     }
 
@@ -867,30 +847,6 @@ public class GradingWindowController {
         }
 
         return sb.toString();
-    }
-
-    /*
-     * Extracts the markdown between xmp tags
-     */
-    private String extractXmpMarkdown(String html) {
-        if (html == null) {
-            return null;
-        }
-
-        String lower = html.toLowerCase();
-
-        int startTag = lower.indexOf("<xmp>");
-        if (startTag < 0) {
-            return null;
-        }
-        int start = startTag + "<xmp>".length();
-
-        int end = lower.indexOf("</xmp>", start);
-        if (end < 0) {
-            return null;
-        }
-
-        return html.substring(start, end).trim();
     }
 
     @FXML
@@ -1664,11 +1620,11 @@ public class GradingWindowController {
 
     @FXML
     private void onSaveDrafts() {
-        // Rebuild rubric + summary, but preserve caret
         boolean success = true;
         int caret = reportEditor.getCaretPosition();
+
         rebuildRubricAndSummaryInEditor(caret, false);
-        // Persist the current editor state (text + caret) into the current student's draft
+
         if (currentStudent != null) {
             StudentDraft d = drafts.computeIfAbsent(currentStudent, StudentDraft::new);
             d.setMarkdown(reportEditor.getText() == null ? "" : reportEditor.getText());
@@ -1676,90 +1632,54 @@ public class GradingWindowController {
             d.setLoadedFromDisk(true);
         }
 
+        int wrote = 0;
+
+        for (String pkg : studentPackages) {
+            StudentDraft d = drafts.computeIfAbsent(pkg, StudentDraft::new);
+
+            if (!d.isLoadedFromDisk()
+                    || d.getMarkdown() == null
+                    || d.getMarkdown().trim().isEmpty()) {
+
+                d.setMarkdown(loadInitialMarkdownForStudent(pkg));
+                d.setLoadedFromDisk(true);
+
+                if (!pkg.equals(currentStudent)) {
+                    d.setCaretPosition(0);
+                }
+            }
+
+            Path repoDir = findRepoDirForStudentPackage(pkg);
+            if (repoDir == null) {
+                status("Could not find repo for " + pkg);
+                success = false;
+            } else {
+                try {
+                    String markdown = d.getMarkdown() == null ? "" : d.getMarkdown();
+
+                    gradingDraftService.saveReportMarkdown(
+                            assignmentId,
+                            pkg,
+                            repoDir,
+                            markdown
+                    );
+
+                    wrote++;
+                } catch (IOException e) {
+                    status("Failed writing report for " + pkg + ": " + e.getMessage());
+                    success = false;
+                }
+            }
+        }
 
         if (success) {
-            int wrote = 0;
-            for (String pkg : studentPackages) {
-                StudentDraft d = drafts.computeIfAbsent(pkg, StudentDraft::new);
-
-                // Ensure we have content for non-current students too
-                if (!d.isLoadedFromDisk()
-                        || d.getMarkdown() == null
-                        || d.getMarkdown().trim().isEmpty()) {
-
-                    d.setMarkdown(loadInitialMarkdownForStudent(pkg));
-                    d.setLoadedFromDisk(true);
-
-                    // Only reset caret for drafts that have never been touched
-                    if (!pkg.equals(currentStudent)) {
-                        d.setCaretPosition(0);
-                    }
-                }
-                Path repoDir = findRepoDirForStudentPackage(pkg);
-                if (repoDir == null) {
-                    status("Could not find repo for " + pkg);
-                    success = false;
-                } else {
-
-                    Path out = repoDir.resolve(assignmentId + pkg + ".md");
-
-                    try {
-                        Files.writeString(out,
-                                d.getMarkdown() == null ? "" : d.getMarkdown(),
-                                StandardCharsets.UTF_8);
-                        wrote++;
-                    } catch (IOException e) {
-                        status("Failed writing " + out.getFileName() + ": " + e.getMessage());
-                        success = false;
-                    }
-                }
-            }
-            if (success) {
-                status("Saved " + wrote + " draft(s) to student repositories.");
-            }
+            status("Saved " + wrote + " HTML report(s) to student repositories.");
         }
     }
 
     @FXML
     private void onExportGradedHtml() {
-        int wrote = 0;
-        int failed = 0;
-        for (String pkg : studentPackages) {
-            Path repoDir = findRepoDirForStudentPackage(pkg);
-            if (repoDir == null) {
-                failed++;
-            } else {
-                Path draftMd = repoDir.resolve(assignmentId + pkg + ".md");
-                if (Files.exists(draftMd) && Files.isRegularFile(draftMd)) {
-                    String md = null;
-                    boolean readSuccess = true;
-                    try {
-                        md = Files.readString(draftMd, StandardCharsets.UTF_8);
-                    } catch (IOException e) {
-                        failed++;
-                        readSuccess = false;
-                    }
-                    if (readSuccess) {
-                        String title = assignmentId + pkg;
-                        String html = wrapMarkdownAsHtml(title, md);
-                        Path outHtml = repoDir.resolve(title + ".html");
-                        Path outMd = repoDir.resolve(title + ".md");
-                        try {
-                            Files.writeString(outHtml, html, StandardCharsets.UTF_8);
-                            Files.writeString(outMd, md, StandardCharsets.UTF_8);
-                            wrote++;
-                        } catch (IOException e) {
-                            failed++;
-                        }
-                    }
-                } else {
-                    failed++;
-                }
-            }
-        }
-
-        status("Export complete: wrote " + wrote +
-                " repo report(s) (.html + .md), failed " + failed + ".");
+        onSaveDrafts();
     }
 
     private Path findRepoDirForStudentPackage(String studentPackage) {
@@ -1798,23 +1718,7 @@ public class GradingWindowController {
     }
 
     private String wrapMarkdownAsHtml(String title, String markdown) {
-        String safeTitle = title == null ? "" : title.trim();
-        String md = markdown == null ? "" : markdown;
-
-        return "<!DOCTYPE html><html><head><meta charset=\"utf-8\"/>" +
-                "<title>" + escapeHtml(safeTitle) + "</title></head><body><xmp>\n" +
-                md +
-                "\n</xmp><script type=\"text/javascript\" " +
-                "src=\"https://csse.msoe.us/gradedown.js\"></script></body></html>\n";
-    }
-
-    private String escapeHtml(String s) {
-        if (s == null) {
-            return "";
-        }
-        return s.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;");
+        return reportHtmlWrapper.wrapMarkdownAsHtml(title, markdown);
     }
 
     @FXML
@@ -1823,24 +1727,20 @@ public class GradingWindowController {
             saveAndExportButton.setDisable(true);
         }
 
-        // Make sure the current editor contents are captured (not just caret listener)
         if (currentStudent != null) {
             saveCurrentEditorToDraft(currentStudent);
         }
 
-        // Save + export on UI thread (touches CodeArea / status label)
         try {
-            onSaveDrafts();       // rebuild + save to grading/
-            onExportGradedHtml(); // write .html + .md into mapped repos
+            onSaveDrafts();
         } catch (Exception e) {
-            status("Save/export failed: " + e.getMessage());
+            status("Save failed: " + e.getMessage());
             if (saveAndExportButton != null) {
                 saveAndExportButton.setDisable(false);
             }
             return;
         }
 
-        // Push in background
         ExecutorService exec = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "push-feedback");
             t.setDaemon(true);
@@ -1850,14 +1750,13 @@ public class GradingWindowController {
         CompletableFuture.runAsync(() -> {
             PushResult r = pushAllRepos();
             Platform.runLater(() -> {
-                status("Save/export/push complete: pushed " + r.pushed +
+                status("Save/push complete: pushed " + r.pushed +
                         ", skipped " + r.skipped + ", failed " + r.failed + ".");
                 if (saveAndExportButton != null) {
                     saveAndExportButton.setDisable(false);
                 }
             });
         }, exec).whenComplete((_, _) -> exec.shutdown());
-
     }
 
     private PushResult pushAllRepos() {
@@ -1874,39 +1773,32 @@ public class GradingWindowController {
 
             String baseName = assignmentId + pkg;
             Path outHtml = repoDir.resolve(baseName + ".html");
-            Path outMd = repoDir.resolve(baseName + ".md");
 
-            // Only attempt push if exported artifacts exist in the mapped repo
-            if (!Files.exists(outHtml) || !Files.exists(outMd)) {
+            if (!Files.exists(outHtml)) {
                 skipped++;
                 continue;
             }
 
             try {
-                int add = runGit(repoDir, "add",
-                        outHtml.getFileName().toString(),
-                        outMd.getFileName().toString());
+                int add = runGit(repoDir, "add", outHtml.getFileName().toString());
 
                 if (add != 0) {
                     failed++;
-                    continue;
+                } else {
+                    int commit = runGit(repoDir, "commit", "-m", "Add feedback for " + assignmentId);
+
+                    if (commit != 0) {
+                        skipped++;
+                    } else {
+                        int push = runGit(repoDir, "push");
+
+                        if (push != 0) {
+                            failed++;
+                        } else {
+                            pushed++;
+                        }
+                    }
                 }
-
-                // Commit will exit non-zero if nothing changed; treat as skipped
-                int commit = runGit(repoDir, "commit", "-m", "Add feedback for " + assignmentId);
-                if (commit != 0) {
-                    skipped++;
-                    continue;
-                }
-
-                int push = runGit(repoDir, "push");
-                if (push != 0) {
-                    failed++;
-                    continue;
-                }
-
-                pushed++;
-
             } catch (IOException | InterruptedException e) {
                 failed++;
             }

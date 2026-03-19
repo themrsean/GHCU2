@@ -171,7 +171,8 @@ public class MainWindowController implements Initializable {
         unitTestService = new UnitTestService(processRunner, serviceLogger);
         checkstyleService = new CheckstyleService(processRunner, serviceLogger, checkstyleJar);
         mappingService = new MappingService(serviceLogger);
-        gradingDraftService = new GradingDraftService();
+        reportHtmlWrapper = new ReportHtmlWrapper();
+        gradingDraftService = new GradingDraftService(reportHtmlWrapper);
         sourceCodeService = new SourceCodeService();
         gitService = new GitService(processRunner);
         reportHtmlWrapper = new ReportHtmlWrapper();

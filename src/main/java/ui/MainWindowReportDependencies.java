@@ -27,7 +27,6 @@ public class MainWindowReportDependencies implements ReportService.ReportDepende
     private final GitService gitService;
     private final ReportHtmlWrapper reportHtmlWrapper;
 
-
     private final Path selectedRootPath;
     private final boolean checkstyleEnabled;
     private final boolean missingCheckstyleRubricItem;
@@ -88,7 +87,8 @@ public class MainWindowReportDependencies implements ReportService.ReportDepende
     }
 
     @Override
-    public UnitTestService.UnitTestResult buildUnitTestResultMarkdown(String studentPackage, Path repoPath) {
+    public UnitTestService.UnitTestResult buildUnitTestResultMarkdown(String studentPackage,
+                                                                      Path repoPath) {
         try {
             return unitTestService.buildUnitTestResultMarkdown(studentPackage, repoPath);
         } catch (Exception e) {
@@ -98,12 +98,31 @@ public class MainWindowReportDependencies implements ReportService.ReportDepende
     }
 
     @Override
-    public Map<String, Integer> loadManualDeductionsFromGradingDraft(String assignmentId, String studentPackage, Path rootPath) {
-        return gradingDraftService.loadManualDeductionsFromGradingDraft(assignmentId, studentPackage, rootPath);
+    public Map<String, Integer> loadManualDeductionsFromGradingDraft(String assignmentId,
+                                                                     String studentPackage,
+                                                                     Path rootPath) {
+        return gradingDraftService.loadManualDeductionsFromGradingDraft(
+                assignmentId,
+                studentPackage,
+                rootPath
+        );
     }
 
     @Override
-    public String buildSourceCodeMarkdown(Assignment assignment, String studentPackage, Path repoPath) {
+    public String loadFeedbackSectionMarkdown(String assignmentId,
+                                              String studentPackage,
+                                              Path rootPath) {
+        return gradingDraftService.loadFeedbackSectionMarkdown(
+                assignmentId,
+                studentPackage,
+                rootPath
+        );
+    }
+
+    @Override
+    public String buildSourceCodeMarkdown(Assignment assignment,
+                                          String studentPackage,
+                                          Path repoPath) {
         return sourceCodeService.buildSourceCodeMarkdown(assignment, studentPackage, repoPath);
     }
 
@@ -114,6 +133,6 @@ public class MainWindowReportDependencies implements ReportService.ReportDepende
 
     @Override
     public String wrapMarkdownAsHtml(String title, String markdown) {
-        return reportHtmlWrapper.wrapMarkdown(title, markdown);
+        return reportHtmlWrapper.wrapMarkdownAsHtml(title, markdown);
     }
 }
