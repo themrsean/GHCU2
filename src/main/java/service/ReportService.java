@@ -113,7 +113,7 @@ public class ReportService {
 
             try {
                 String markdown = buildReportMarkdown(assignment, pkg, repoRoot);
-                String html = deps.wrapMarkdownAsHtml(reportFileName, markdown);
+                String html = deps.wrapMarkdownAsHtml(pkg, markdown);
 
                 Files.deleteIfExists(reportPath);
                 Files.writeString(reportPath, html);
@@ -162,13 +162,6 @@ public class ReportService {
             feedbackMarkdown = "> * No feedback provided";
         }
 
-        String title =
-                assignment.getCourseCode()
-                        + " "
-                        + assignment.getAssignmentCode()
-                        + " - "
-                        + assignment.getAssignmentName();
-
         String rubricTableMarkdown =
                 RubricTableBuilder.buildRubricMarkdown(
                         assignment,
@@ -180,32 +173,19 @@ public class ReportService {
                 );
 
         return
-                "# " + title + newline + newline +
-
-                        "<!-- RUBRIC_TABLE_BEGIN -->" + newline +
+                "# " + assignment.getAssignmentName() + newline + newline +
                         rubricTableMarkdown + newline +
-                        "<!-- RUBRIC_TABLE_END -->" + newline + newline +
-
-                        "<!-- COMMENTS_SUMMARY_BEGIN -->" + newline +
+                        ">" + newline +
+                        ">" + newline +
                         "> # Feedback" + newline +
                         feedbackMarkdown + newline + newline +
-                        "<!-- COMMENTS_SUMMARY_END -->" + newline + newline +
-
-                        "## Source Code" + newline + newline +
-                        deps.buildSourceCodeMarkdown(assignment, studentPackage, repoPath)
-                        + newline + newline +
-
+                        deps.buildSourceCodeMarkdown(assignment, studentPackage, repoPath) + newline + newline +
                         "## Checkstyle Violations" + newline + newline +
-                        cs.markdown()
-                        + newline + newline +
-
+                        cs.markdown() + newline + newline +
                         "## Failed Unit Tests" + newline + newline +
-                        ut.markdown()
-                        + newline + newline +
-
+                        ut.markdown() + newline + newline +
                         "## Commit History (Last 10)" + newline + newline +
-                        deps.buildCommitHistoryMarkdown(repoPath)
-                        + newline;
+                        deps.buildCommitHistoryMarkdown(repoPath) + newline;
     }
 
     public record ReportGenerationResult(boolean wroteAny, boolean hadFailures) {
