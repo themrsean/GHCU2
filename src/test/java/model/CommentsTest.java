@@ -86,6 +86,50 @@ final class CommentsTest {
     }
 
     @Test
+    void parseInjectedComments_parsesInlineAnchorForBackwardCompatibility() {
+        String md = "prefix <a id=\"c_inline\"></a> suffix\n"
+                + "> #### Inline Title\n"
+                + "> * -3 points (ri_impl)\n";
+
+        List<Comments.ParsedComment> parsed = Comments.parseInjectedComments(md);
+        assertEquals(1, parsed.size());
+
+        Comments.ParsedComment p = parsed.get(0);
+        assertEquals("c_inline", p.anchorId());
+        assertEquals("ri_impl", p.rubricItemId());
+        assertEquals(3, p.pointsLost());
+        assertEquals("Inline Title", p.title());
+    }
+
+    @Test
+    void parseInjectedComments_inlineAnchorWithNoPoints_doesNotCreateEntry() {
+        String md = "prefix <a id=\"c_inline_bad\"></a> suffix\n"
+                + "> #### Missing Points\n"
+                + "not-a-points-line\n";
+
+        List<Comments.ParsedComment> parsed = Comments.parseInjectedComments(md);
+        assertTrue(parsed.isEmpty());
+    }
+
+    @Test
+    void parseInjectedComments_parsesCanonicalHeaderPointsWithRubricMeta() {
+        String md = "<a id=\"c_new\"></a>\n"
+                + "<!-- cmt-meta rubric:ri_impl -->\n"
+                + "```\n"
+                + "> #### -4 CheckStyle Errors\n"
+                + "> Details go here...\n"
+                + "```\n";
+
+        List<Comments.ParsedComment> parsed = Comments.parseInjectedComments(md);
+        assertEquals(1, parsed.size());
+        Comments.ParsedComment p = parsed.get(0);
+        assertEquals("c_new", p.anchorId());
+        assertEquals("ri_impl", p.rubricItemId());
+        assertEquals(4, p.pointsLost());
+        assertEquals("CheckStyle Errors", p.title());
+    }
+
+    @Test
     void commentDef_toString_handlesNullsAndValues() {
         Comments.CommentDef d1 = new Comments.CommentDef();
         // both id and title null -> " — "

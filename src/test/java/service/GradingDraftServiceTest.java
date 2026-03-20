@@ -72,6 +72,39 @@ public class GradingDraftServiceTest {
     }
 
     @Test
+    public void loadManualDeductions_mixedLegacyInlineAndCanonicalInjectedComments(
+            @TempDir Path tmp) throws Exception {
+        GradingDraftService service =
+                new GradingDraftService(new ReportHtmlWrapper());
+
+        String markdown = String.join(
+                System.lineSeparator(),
+                "# Sample",
+                "",
+                "AB<a id=\"cmt_inline\"></a>CD",
+                "```",
+                "> #### Inline legacy",
+                "> * -2 points (ri_impl)",
+                "```",
+                "",
+                "<a id=\"cmt_canonical\"></a>",
+                "```",
+                "> #### Canonical",
+                "> * -3 points (ri_impl)",
+                "```"
+        );
+
+        service.saveReportMarkdown("A1", "smith", tmp, markdown);
+
+        Map<String, Integer> result =
+                service.loadManualDeductionsFromGradingDraft("A1", "smith", tmp);
+
+        assertNotNull(result);
+        assertEquals(5, result.getOrDefault("ri_impl", -1).intValue());
+        assertEquals(1, result.size());
+    }
+
+    @Test
     public void loadFeedbackSectionMarkdown_prefersFeedbackHeaderOverSummaryBlock(
             @TempDir Path tmp) throws Exception {
         GradingDraftService service =

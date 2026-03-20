@@ -26,7 +26,7 @@ public class GradingDraftService {
     private static final String RUBRIC_TABLE_BEGIN = "<!-- RUBRIC_TABLE_BEGIN -->";
     private static final String RUBRIC_TABLE_END = "<!-- RUBRIC_TABLE_END -->";
     private static final String FEEDBACK_HEADER = "> # Feedback";
-    private static final String DEFAULT_FEEDBACK_MARKDOWN = "> * No feedback provided";
+    private static final String DEFAULT_FEEDBACK_MARKDOWN = "> * Nice work";
 
     private final ReportHtmlWrapper htmlWrapper;
     private final ReportFileWriter reportFileWriter;

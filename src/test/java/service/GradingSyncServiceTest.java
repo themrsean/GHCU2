@@ -168,12 +168,13 @@ public class GradingSyncServiceTest {
         Path localRepo = createRepoWithUpstream(tmp.resolve("repo-local"), remoteDir);
         Path divergingClone = tmp.resolve("repo-diverge");
         cloneRepo(remoteDir, divergingClone);
+        runGit(divergingClone, "checkout", "-B", "main", "origin/main");
 
         // Advance remote history from another clone so local push becomes non-fast-forward.
         Files.writeString(divergingClone.resolve("ADVANCE.txt"), "remote advanced");
         runGit(divergingClone, "add", "ADVANCE.txt");
         runGit(divergingClone, "commit", "-m", "advance remote");
-        runGit(divergingClone, "push");
+        runGit(divergingClone, "push", "-u", "origin", "main");
 
         Files.writeString(localRepo.resolve("A1pkg1.html"), "feedback");
         Map<String, Path> repos = Map.of("pkg1", localRepo);

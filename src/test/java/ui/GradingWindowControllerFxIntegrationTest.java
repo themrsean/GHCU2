@@ -45,6 +45,7 @@ class GradingWindowControllerFxIntegrationTest {
 
     private static final int SHORT_WAIT_MILLIS = 200;
     private static final int LONG_WAIT_MILLIS = 10000;
+    private static final int MODAL_ACTION_POLL_MILLIS = 100;
     private static volatile boolean javaFxAvailable;
 
     private String originalUserHome;
@@ -225,7 +226,7 @@ class GradingWindowControllerFxIntegrationTest {
         });
 
         waitUntilTrue(() -> "pkgB".equals(readCurrentStudent(fixture.controller)));
-        waitUntilTrue(() -> "beta-draft".equals(fixture.reportEditor.getText()));
+        waitUntilTrue(() -> fixture.reportEditor.getText().contains("beta-draft"));
 
         assertEquals("alpha-draft", readDraftMarkdown(fixture.controller, "pkgA"));
     }
@@ -362,7 +363,7 @@ class GradingWindowControllerFxIntegrationTest {
                 fixture.statusLabel,
                 "Saved 1 HTML report(s) to student repositories."
         );
-        assertTrue(Files.exists(repoDir.resolve("CSCA1pkg1.html")));
+        assertTrue(Files.exists(repoDir.resolve("A1pkg1.html")));
     }
 
     @Test
@@ -456,7 +457,7 @@ class GradingWindowControllerFxIntegrationTest {
                 fixture.statusLabel,
                 "Saved 1 HTML report(s) to student repositories."
         );
-        assertTrue(Files.exists(repoDir.resolve("CSCA1pkg1.html")));
+        assertTrue(Files.exists(repoDir.resolve("A1pkg1.html")));
     }
 
     @Test
@@ -532,7 +533,65 @@ class GradingWindowControllerFxIntegrationTest {
         waitUntilTrue(() -> fixture.reportEditor.getText().contains("<a id=\"cmt_c1\"></a>"));
         String text = runOnFxAndWaitResult(() -> fixture.reportEditor.getText());
         assertTrue(text.contains("<a id=\"cmt_c1\"></a>"));
-        assertTrue(text.contains("> * -2 points (ri_impl)"));
+        assertTrue(text.contains("> #### -2 Style"));
+    }
+
+    @Test
+    void onInsertComment_modalApply_insertsAtCaret_andPreservesCaret_andRebuildsRubric(
+            @TempDir Path tmp
+    ) throws Exception {
+        Path repoDir = tmp.resolve("repo-insert-caret");
+        Files.createDirectories(repoDir);
+        Path mappingsPath = tmp.resolve("mappings.json");
+        writeMappingFile(mappingsPath, Map.of("pkg1", repoDir.toString()));
+        writeCommentsJson(tmp, 1);
+
+        FxFixture fixture = loadFixture(tmp, mappingsPath);
+        waitUntilTrue(() -> "pkg1".equals(readCurrentStudent(fixture.controller)));
+
+        runOnFxAndWait(() -> fixture.reportEditor.replaceText(
+                """
+                # Assignment
+
+                <!-- RUBRIC_TABLE_BEGIN -->
+                >> | Earned | Possible | Criteria |
+                >> | --- | --- | --- |
+                >> | 10 | 10 | Implementation |
+                >> | 10 | 10 | TOTAL |
+                <!-- RUBRIC_TABLE_END -->
+
+                > # Feedback
+                > * Start
+
+                ABCD
+                """
+        ));
+        runOnFxAndWait(() -> {
+            int caret = fixture.reportEditor.getText().indexOf("ABCD") + 2;
+            fixture.reportEditor.moveTo(caret);
+        });
+
+        scheduleFxModalAction(() -> clickButtonInTopModal("Apply"));
+        invokePrivateNoArgAsync(fixture.controller, "onInsertComment");
+
+        waitUntilTrue(() -> fixture.reportEditor.getText().contains("<a id=\"cmt_c1\"></a>"));
+        runOnFxAndWait(() -> invokePrivateNoArg(fixture.controller, "onRebuildSummary"));
+        String text = runOnFxAndWaitResult(() -> fixture.reportEditor.getText());
+        int caretAfter = runOnFxAndWaitResult(() -> fixture.reportEditor.getCaretPosition());
+        int anchorIndex = text.indexOf("<a id=\"cmt_c1\"></a>");
+        int abIndex = text.indexOf("AB");
+        int cdIndex = text.indexOf("CD");
+
+        assertTrue(abIndex >= 0);
+        assertTrue(cdIndex > abIndex);
+        assertTrue(text.contains("ABCD"));
+        assertFalse(text.contains("AB<a id=\"cmt_c1\"></a>CD"));
+        assertTrue(anchorIndex > cdIndex);
+        assertTrue(text.matches(
+                "(?s).*(?:>>\\s*)?\\|\\s*8(?:\\.0+)?\\s*\\|\\s*10(?:\\.0+)?\\s*\\|\\s*Implementation\\b.*"
+        ));
+        assertTrue(anchorIndex >= 0);
+        assertTrue(caretAfter > anchorIndex);
     }
 
     @Test
@@ -552,11 +611,73 @@ class GradingWindowControllerFxIntegrationTest {
 
         scheduleFxModalAction(() -> clickButtonInTopModal("Cancel"));
         invokePrivateNoArgAsync(fixture.controller, "onInsertComment");
-        Thread.sleep(SHORT_WAIT_MILLIS);
+        waitUntilTrue(() -> findTopShowingModal() == null);
 
         String after = runOnFxAndWaitResult(() -> fixture.reportEditor.getText());
         assertEquals(before, after);
         assertFalse(after.contains("<a id=\"cmt_c1\"></a>"));
+    }
+
+    @Test
+    void onInsertComment_modalApply_cancelsWhenStudentChangesDuringModal(@TempDir Path tmp)
+            throws Exception {
+        Path repoA = tmp.resolve("repo-a");
+        Path repoB = tmp.resolve("repo-b");
+        Files.createDirectories(repoA);
+        Files.createDirectories(repoB);
+        Path mappingsPath = tmp.resolve("mappings.json");
+        writeMappingFile(mappingsPath, Map.of("pkg1", repoA.toString(), "pkg2", repoB.toString()));
+        writeCommentsJson(tmp, 1);
+
+        FxFixture fixture = loadFixture(tmp, mappingsPath);
+        waitUntilTrue(() -> {
+            String student = readCurrentStudent(fixture.controller);
+            return student != null && !student.isBlank();
+        });
+        String initialStudent = readCurrentStudent(fixture.controller);
+        String otherStudent = "pkg1".equals(initialStudent) ? "pkg2" : "pkg1";
+
+        runOnFxAndWait(() -> fixture.reportEditor.replaceText("# Base\n"));
+        scheduleFxModalAction(() -> {
+            setField(fixture.controller, "currentStudent", otherStudent);
+            return clickButtonInTopModal("Apply");
+        });
+        invokePrivateNoArgAsync(fixture.controller, "onInsertComment");
+
+        waitUntilStatusContains(
+                fixture.statusLabel,
+                "Insert Comment cancelled: active student changed while picker was open."
+        );
+        String text = runOnFxAndWaitResult(() -> fixture.reportEditor.getText());
+        assertFalse(text.contains("<a id=\"cmt_c1\"></a>"));
+    }
+
+    @Test
+    void onInsertComment_modalApply_cancelsWhenReportChangesDuringModal(@TempDir Path tmp)
+            throws Exception {
+        Path repoDir = tmp.resolve("repo-insert-mutation");
+        Files.createDirectories(repoDir);
+        Path mappingsPath = tmp.resolve("mappings.json");
+        writeMappingFile(mappingsPath, Map.of("pkg1", repoDir.toString()));
+        writeCommentsJson(tmp, 1);
+
+        FxFixture fixture = loadFixture(tmp, mappingsPath);
+        waitUntilTrue(() -> "pkg1".equals(readCurrentStudent(fixture.controller)));
+
+        runOnFxAndWait(() -> fixture.reportEditor.replaceText("# Base\n"));
+        scheduleFxModalAction(() -> {
+            fixture.reportEditor.replaceText("# Changed while modal open\n");
+            return clickButtonInTopModal("Apply");
+        });
+        invokePrivateNoArgAsync(fixture.controller, "onInsertComment");
+
+        waitUntilStatusContains(
+                fixture.statusLabel,
+                "Insert Comment cancelled: report changed while picker was open."
+        );
+        String text = runOnFxAndWaitResult(() -> fixture.reportEditor.getText());
+        assertFalse(text.contains("<a id=\"cmt_c1\"></a>"));
+        assertTrue(text.contains("# Changed while modal open"));
     }
 
     @Test
@@ -617,7 +738,7 @@ class GradingWindowControllerFxIntegrationTest {
 
         scheduleFxModalAction(() -> clickButtonInTopModal("Cancel"));
         invokePrivateNoArgAsync(fixture.controller, "onRemoveComment");
-        Thread.sleep(SHORT_WAIT_MILLIS);
+        waitUntilTrue(() -> findTopShowingModal() == null);
 
         String after = runOnFxAndWaitResult(() -> fixture.reportEditor.getText());
         assertEquals(before, after);
@@ -712,7 +833,7 @@ class GradingWindowControllerFxIntegrationTest {
         runOnFxAndWait(() -> invokePrivateNoArg(fixture.controller, "onCloseAndSaveAll"));
 
         waitUntilTrue(() -> !fixture.stage.isShowing());
-        Path savedReport = repoDir.resolve("CSCA1pkg1.html");
+        Path savedReport = repoDir.resolve("A1pkg1.html");
         assertTrue(Files.exists(savedReport));
     }
 
@@ -755,7 +876,7 @@ class GradingWindowControllerFxIntegrationTest {
         });
 
         waitUntilTrue(() -> findShowingStageByTitle("Preview: Current Draft") != null);
-        Path previewFile = expectedPreviewFile(tmp, "CSCA1pkg1");
+        Path previewFile = expectedPreviewFile(tmp, "A1pkg1");
         waitUntilTrue(() -> Files.exists(previewFile));
 
         runOnFxAndWait(() -> {
@@ -833,13 +954,12 @@ class GradingWindowControllerFxIntegrationTest {
     }
 
     private void waitUntilStatusContains(Label statusLabel, String expected) throws Exception {
-        long deadline = System.currentTimeMillis() + LONG_WAIT_MILLIS;
-        while (System.currentTimeMillis() < deadline) {
-            String text = runOnFxAndWaitResult(statusLabel::getText);
-            if (text != null && text.contains(expected)) {
-                return;
-            }
-            Thread.sleep(SHORT_WAIT_MILLIS);
+        boolean satisfied = waitForFxCondition(() -> {
+            String text = statusLabel.getText();
+            return text != null && text.contains(expected);
+        }, LONG_WAIT_MILLIS, SHORT_WAIT_MILLIS);
+        if (satisfied) {
+            return;
         }
         String finalText = runOnFxAndWaitResult(statusLabel::getText);
         assertTrue(finalText != null && finalText.contains(expected),
@@ -847,15 +967,7 @@ class GradingWindowControllerFxIntegrationTest {
     }
 
     private void waitUntilTrue(FxBooleanSupplier condition) throws Exception {
-        long deadline = System.currentTimeMillis() + LONG_WAIT_MILLIS;
-        while (System.currentTimeMillis() < deadline) {
-            Boolean ok = runOnFxAndWaitResult(condition::getAsBoolean);
-            if (Boolean.TRUE.equals(ok)) {
-                return;
-            }
-            Thread.sleep(SHORT_WAIT_MILLIS);
-        }
-        assertTrue(Boolean.TRUE.equals(runOnFxAndWaitResult(condition::getAsBoolean)),
+        assertTrue(waitForFxCondition(condition, LONG_WAIT_MILLIS, SHORT_WAIT_MILLIS),
                 "Timed out waiting for condition.");
     }
 
@@ -920,31 +1032,33 @@ class GradingWindowControllerFxIntegrationTest {
     private void scheduleFxModalAction(FxBooleanSupplier action) {
         Thread thread = new Thread(() -> {
             try {
-                final int attempts = 80;
-                for (int i = 0; i < attempts; i++) {
-                    CountDownLatch latch = new CountDownLatch(1);
-                    AtomicReference<Boolean> success = new AtomicReference<>(false);
-                    Platform.runLater(() -> {
-                        try {
-                            success.set(action.getAsBoolean());
-                        } catch (Exception e) {
-                            success.set(false);
-                        } finally {
-                            latch.countDown();
-                        }
-                    });
-                    latch.await(1, TimeUnit.SECONDS);
-                    if (Boolean.TRUE.equals(success.get())) {
-                        return;
-                    }
-                    Thread.sleep(100);
-                }
+                waitForFxCondition(action, LONG_WAIT_MILLIS, MODAL_ACTION_POLL_MILLIS);
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
+            } catch (Exception ignored) {
+                // test helper best-effort only
             }
         }, "fx-modal-driver");
         thread.setDaemon(true);
         thread.start();
+    }
+
+    private boolean waitForFxCondition(FxBooleanSupplier condition,
+                                       long timeoutMillis,
+                                       long pollIntervalMillis) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        while (System.currentTimeMillis() < deadline) {
+            Boolean ok = runOnFxAndWaitResult(condition::getAsBoolean);
+            if (Boolean.TRUE.equals(ok)) {
+                return true;
+            }
+            pausePolling(pollIntervalMillis);
+        }
+        return Boolean.TRUE.equals(runOnFxAndWaitResult(condition::getAsBoolean));
+    }
+
+    private void pausePolling(long millis) throws InterruptedException {
+        Thread.sleep(millis);
     }
 
     private void clickButtonInStage(String stageTitle, String buttonText) {

@@ -80,6 +80,7 @@ public class GradingWindowController {
     private static final String RUBRIC_TABLE_BEGIN = "<!-- RUBRIC_TABLE_BEGIN -->";
     private static final String RUBRIC_TABLE_END = "<!-- RUBRIC_TABLE_END -->";
     private static final String FEEDBACK_HEADER = "> # Feedback";
+    private static final int MAX_LEGACY_NORMALIZE_PASSES = 5;
     // --- Syntax highlighting (Java) ---
     private static final String[] KEYWORDS = new String[] {
             "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class",
@@ -460,11 +461,20 @@ public class GradingWindowController {
         } else if (currentStudent == null) {
             status("Insert Comment failed: no student selected.");
         } else {
+            InsertCommentTransaction insertTransaction = captureInsertCommentTransaction();
             CommentDef selected = openCommentPicker();
             if (selected != null) {
-                applyCommentToEditor(selected);
+                applyCommentToEditor(selected, insertTransaction);
             }
         }
+    }
+
+    private InsertCommentTransaction captureInsertCommentTransaction() {
+        String studentAtClick = currentStudent;
+        int caretAtClick = reportEditor.getCaretPosition();
+        String baseText = reportEditor.getText() == null ? "" : reportEditor.getText();
+        int baseTextHash = baseText.hashCode();
+        return new InsertCommentTransaction(studentAtClick, caretAtClick, baseText, baseTextHash);
     }
 
     @FXML
@@ -503,6 +513,7 @@ public class GradingWindowController {
 
         int caret = reportEditor.getCaretPosition();
         String text = reportEditor.getText() == null ? "" : reportEditor.getText();
+        List<ParsedComment> previousComments = Comments.parseInjectedComments(text);
         RemovalResult result = removeInjectedCommentBlock(text, anchorId);
         if (!result.found()) {
             status("Could not find comment anchor: " + anchorId);
@@ -523,7 +534,7 @@ public class GradingWindowController {
         setEditorTextPreservingCaret(currentStudent, updated, desiredCaret, false);
 
         // rebuild once (NO centering)
-        rebuildRubricAndSummaryInEditor(desiredCaret, false);
+        rebuildRubricAndSummaryInEditor(desiredCaret, false, previousComments);
 
         status("Removed comment.");
     }
@@ -577,9 +588,21 @@ public class GradingWindowController {
 
     private void rebuildRubricAndSummaryInEditor(int caretToRestore, boolean centerCaret) {
         String text = reportEditor.getText() == null ? "" : reportEditor.getText();
+        List<ParsedComment> previousComments = Comments.parseInjectedComments(text);
+        rebuildRubricAndSummaryInEditor(caretToRestore, centerCaret, previousComments);
+    }
+
+    private void rebuildRubricAndSummaryInEditor(int caretToRestore,
+                                                 boolean centerCaret,
+                                                 List<ParsedComment> previousComments) {
+        String text = reportEditor.getText() == null ? "" : reportEditor.getText();
         String canonical = normalizeRubricAndSummaryBlocks(text, currentStudent);
-        String updated = rebuildRubricAndSummaryText(canonical, gradingReportEditorService);
-        updated = normalizeForLegacyEditorView(updated);
+        String updated = rebuildRubricAndSummaryText(
+                canonical,
+                previousComments,
+                gradingReportEditorService
+        );
+        updated = normalizeForLegacyEditorViewToFixedPoint(updated);
         if (!updated.equals(text)) {
             setEditorTextPreservingCaret(currentStudent, updated, caretToRestore, centerCaret);
         } else {
@@ -593,6 +616,60 @@ public class GradingWindowController {
         String safeText = text == null ? "" : text;
         List<ParsedComment> comments = Comments.parseInjectedComments(safeText);
         return editorService.rebuildRubricAndSummary(safeText, comments);
+    }
+
+    static String rebuildRubricAndSummaryText(String text,
+                                              List<ParsedComment> previousComments,
+                                              GradingReportEditorService editorService) {
+        String safeText = text == null ? "" : text;
+        String withSummary = ensureSummaryBlockForRebuild(safeText, previousComments);
+        List<ParsedComment> comments = Comments.parseInjectedComments(safeText);
+        return editorService.rebuildRubricAndSummary(withSummary, comments);
+    }
+
+    private static String ensureSummaryBlockForRebuild(String text,
+                                                       List<ParsedComment> previousComments) {
+        String safeText = text == null ? "" : text;
+        String withoutSummary = GradingMarkdownSections.removeAllBlocks(
+                safeText,
+                COMMENTS_SUMMARY_BEGIN,
+                COMMENTS_SUMMARY_END
+        );
+        String newline = System.lineSeparator();
+        StringBuilder summary = new StringBuilder();
+        summary.append(">> # Comments").append(newline);
+        summary.append(">>").append(newline);
+        if (previousComments == null || previousComments.isEmpty()) {
+            summary.append(">> * _No comments._").append(newline);
+        } else {
+            for (ParsedComment comment : previousComments) {
+                if (comment == null) {
+                    continue;
+                }
+                String title = comment.title() == null ? "" : comment.title();
+                String anchor = comment.anchorId() == null ? "" : comment.anchorId();
+                String rubric = comment.rubricItemId() == null ? "" : comment.rubricItemId();
+                int pointsLost = Math.max(0, comment.pointsLost());
+                summary.append(">> * [")
+                        .append(title)
+                        .append("](#")
+                        .append(anchor)
+                        .append(") (-")
+                        .append(pointsLost)
+                        .append(" ")
+                        .append(rubric)
+                        .append(")")
+                        .append(newline);
+            }
+        }
+
+        String block = COMMENTS_SUMMARY_BEGIN + newline
+                + summary.toString().trim()
+                + newline
+                + COMMENTS_SUMMARY_END;
+
+        String prefix = withoutSummary.endsWith(newline) ? withoutSummary : withoutSummary + newline;
+        return prefix + newline + block + newline;
     }
 
     private CommentDef openCommentPicker() {
@@ -623,34 +700,142 @@ public class GradingWindowController {
         }
     }
 
-    private void applyCommentToEditor(CommentDef def) {
+    private void applyCommentToEditor(CommentDef def, InsertCommentTransaction insertTransaction) {
+        if (insertTransaction == null) {
+            status("Insert Comment failed: missing insertion context.");
+            return;
+        }
+        if (!Objects.equals(currentStudent, insertTransaction.studentPackage())) {
+            status("Insert Comment cancelled: active student changed while picker was open.");
+            return;
+        }
+
+        String currentEditorText = reportEditor.getText() == null ? "" : reportEditor.getText();
+        if (currentEditorText.hashCode() != insertTransaction.baseTextHash()
+                || !currentEditorText.equals(insertTransaction.baseText())) {
+            status("Insert Comment cancelled: report changed while picker was open.");
+            return;
+        }
+
         String rubricId = def.getRubricItemId();
         int requestedLoss = Math.max(0, def.getPointsDeducted());
 
         int maxForRubric = getMaxPointsForRubricItem(rubricId);
 
-        int alreadyLost = computePointsLostInEditorForRubric(rubricId);
+        int alreadyLost = computePointsLostInTextForRubric(insertTransaction.baseText(), rubricId);
         int appliedLoss = computeAppliedLoss(requestedLoss, maxForRubric, alreadyLost);
 
         String anchorId = makeAnchorIdFromComment(def);
         String injected = buildInjectedCommentMarkdown(def, anchorId, appliedLoss);
 
 
-        int caret = reportEditor.getCaretPosition();
-        String text = reportEditor.getText() == null ? "" : reportEditor.getText();
+        int caret = insertTransaction.caretPosition();
+        String text = insertTransaction.baseText();
+        List<ParsedComment> previousComments = Comments.parseInjectedComments(text);
 
         caret = Math.max(0, Math.min(caret, text.length()));
-
-        String out = text.substring(0, caret) + injected + text.substring(caret);
-
-        int desiredCaret = Math.min(caret + injected.length(), out.length());
+        InsertBlockResult insertResult = insertCanonicalCommentBlock(text, injected, caret);
+        String out = insertResult.updatedText();
+        int desiredCaret = insertResult.caretAfterBlock();
 
         setEditorTextPreservingCaret(currentStudent, out, desiredCaret, false);
 
         // IMPORTANT: rebuild must preserve caret
-        rebuildRubricAndSummaryInEditor(desiredCaret, false);
+        rebuildRubricAndSummaryInEditor(desiredCaret, false, previousComments);
+        restoreCaretToInsertedAnchor(anchorId, desiredCaret);
 
         status("Inserted comment: " + def.getCommentId() + " (-" + appliedLoss + ")");
+    }
+
+    private void restoreCaretToInsertedAnchor(String anchorId, int fallbackCaret) {
+        Platform.runLater(() -> Platform.runLater(() -> {
+            if (anchorId == null || anchorId.isBlank() || currentStudent == null) {
+                restoreCaretAfterUpdate(currentStudent, fallbackCaret);
+                return;
+            }
+            String text = reportEditor.getText() == null ? "" : reportEditor.getText();
+            String anchor = "<a id=\"" + anchorId + "\"></a>";
+            int anchorIndex = text.indexOf(anchor);
+            int targetCaret = anchorIndex >= 0 ? anchorIndex : fallbackCaret;
+            restoreCaretAfterUpdate(currentStudent, targetCaret);
+        }));
+    }
+
+    static InsertBlockResult insertCanonicalCommentBlock(String text,
+                                                         String block,
+                                                         int caret) {
+        String safeText = text == null ? "" : text;
+        String safeBlock = block == null ? "" : block;
+        int safeCaret = Math.max(0, Math.min(caret, safeText.length()));
+        int insertAt = normalizeInsertionPositionForCommentBlock(safeText, safeCaret);
+
+        String before = safeText.substring(0, insertAt);
+        String after = safeText.substring(insertAt);
+
+        String newline = System.lineSeparator();
+        String prefixSeparator = (before.isEmpty() || endsWithLineBreak(before)) ? "" : newline;
+        String suffixSeparator = (after.isEmpty() || startsWithLineBreak(after)) ? "" : newline;
+
+        StringBuilder out = new StringBuilder(
+                safeText.length()
+                        + safeBlock.length()
+                        + prefixSeparator.length()
+                        + suffixSeparator.length()
+        );
+        out.append(before).append(prefixSeparator).append(safeBlock);
+        int caretAfterBlock = out.length();
+        out.append(suffixSeparator).append(after);
+        return new InsertBlockResult(out.toString(), caretAfterBlock);
+    }
+
+    static int normalizeInsertionPositionForCommentBlock(String text, int caret) {
+        String safeText = text == null ? "" : text;
+        int safeCaret = Math.max(0, Math.min(caret, safeText.length()));
+        if (safeText.isEmpty()) {
+            return 0;
+        }
+
+        int lineStart = safeText.lastIndexOf('\n', Math.max(0, safeCaret - 1));
+        lineStart = lineStart < 0 ? 0 : lineStart + 1;
+
+        int lineEnd = safeText.indexOf('\n', safeCaret);
+        lineEnd = lineEnd < 0 ? safeText.length() : lineEnd;
+
+        if (safeCaret == lineStart || safeCaret == lineEnd) {
+            return safeCaret;
+        }
+
+        String line = safeText.substring(lineStart, lineEnd);
+        if (line.trim().isEmpty()) {
+            return lineStart;
+        }
+        return lineEnd;
+    }
+
+    private static boolean endsWithLineBreak(String value) {
+        if (value == null || value.isEmpty()) {
+            return false;
+        }
+        char last = value.charAt(value.length() - 1);
+        return last == '\n' || last == '\r';
+    }
+
+    private static boolean startsWithLineBreak(String value) {
+        if (value == null || value.isEmpty()) {
+            return false;
+        }
+        char first = value.charAt(0);
+        return first == '\n' || first == '\r';
+    }
+
+    private record InsertCommentTransaction(String studentPackage,
+                                            int caretPosition,
+                                            String baseText,
+                                            int baseTextHash) {
+    }
+
+    record InsertBlockResult(String updatedText,
+                             int caretAfterBlock) {
     }
 
     static int computeAppliedLoss(int requestedLoss,
@@ -669,15 +854,14 @@ public class GradingWindowController {
 
         injected.append("<a id=\"").append(anchorId).append("\"></a>")
                 .append(System.lineSeparator());
+        injected.append("<!-- cmt-meta rubric:")
+                .append(rubricId == null ? "" : rubricId)
+                .append(" -->")
+                .append(System.lineSeparator());
         injected.append("```").append(System.lineSeparator());
         injected.append("> #### ")
+                .append(formatCommentHeaderPrefix(appliedLoss))
                 .append(def.getTitle() == null ? "" : def.getTitle().trim())
-                .append(System.lineSeparator());
-        injected.append("> * -")
-                .append(appliedLoss)
-                .append(" points (")
-                .append(rubricId)
-                .append(")")
                 .append(System.lineSeparator());
 
         String body = def.getBodyMarkdown() == null ? "" : def.getBodyMarkdown().trim();
@@ -687,9 +871,17 @@ public class GradingWindowController {
             }
         }
 
+        injected.append(System.lineSeparator());
         injected.append("```").append(System.lineSeparator());
         injected.append(System.lineSeparator());
         return injected.toString();
+    }
+
+    private static String formatCommentHeaderPrefix(int appliedLoss) {
+        if (appliedLoss <= 0) {
+            return "";
+        }
+        return "-" + appliedLoss + " ";
     }
 
     private String makeAnchorIdFromComment(CommentDef def) {
@@ -734,6 +926,22 @@ public class GradingWindowController {
             return 0;
         }
 
+        int parsedTotal = 0;
+        List<ParsedComment> parsedComments = Comments.parseInjectedComments(text);
+        for (ParsedComment comment : parsedComments) {
+            if (comment == null) {
+                continue;
+            }
+            if (!rubricItemId.equals(comment.rubricItemId())) {
+                continue;
+            }
+            parsedTotal += Math.max(0, comment.pointsLost());
+        }
+        if (parsedTotal > 0) {
+            return parsedTotal;
+        }
+
+        // Legacy fallback for older drafts that only have points lines.
         int total = 0;
         String[] lines = text.split("\\R");
         for (String line : lines) {
@@ -1291,9 +1499,22 @@ public class GradingWindowController {
         );
         out = removeTotalRowFromRubricTable(out);
         out = ensureRubricTableBeforeFeedback(out);
+        out = normalizeSpacingBeforeRubricTable(out);
         out = normalizeSpacingBetweenRubricAndFeedback(out);
         out = normalizeSpacingAfterFeedbackBlock(out);
-        return out;
+        return out.replaceFirst("(?s)\\R+\\z", "");
+    }
+
+    private String normalizeForLegacyEditorViewToFixedPoint(String markdown) {
+        String current = normalizeForLegacyEditorView(markdown);
+        for (int i = 0; i < MAX_LEGACY_NORMALIZE_PASSES; i++) {
+            String next = normalizeForLegacyEditorView(current);
+            if (next.equals(current)) {
+                return next;
+            }
+            current = next;
+        }
+        return current;
     }
 
     private String normalizeSpacingBetweenRubricAndFeedback(String markdown) {
@@ -1348,6 +1569,28 @@ public class GradingWindowController {
                 + ">"
                 + System.lineSeparator()
                 + after;
+    }
+
+    private String normalizeSpacingBeforeRubricTable(String markdown) {
+        if (markdown == null || markdown.isBlank()) {
+            return markdown;
+        }
+
+        final Pattern tableHeaderPattern = Pattern.compile(
+                "(?m)^[ \\t]*>>[ \\t]*\\|[ \\t]*Earned[ \\t]*\\|[ \\t]*Possible"
+                        + "[ \\t]*\\|[ \\t]*Criteria.*$"
+        );
+        Matcher tableMatcher = tableHeaderPattern.matcher(markdown);
+        if (!tableMatcher.find()) {
+            return markdown;
+        }
+
+        int tableLineStart = markdown.lastIndexOf('\n', tableMatcher.start());
+        tableLineStart = tableLineStart < 0 ? 0 : tableLineStart + 1;
+        String before = markdown.substring(0, tableLineStart).replaceFirst("(?s)\\R+\\z", "");
+        String after = markdown.substring(tableLineStart);
+
+        return before + System.lineSeparator() + System.lineSeparator() + after;
     }
 
     private String normalizeSpacingAfterFeedbackBlock(String markdown) {

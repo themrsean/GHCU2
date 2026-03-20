@@ -386,11 +386,31 @@ public class GradingWindowControllerTest {
         String markdown = GradingWindowController.buildInjectedCommentMarkdown(def, "cmt_x", 2);
 
         assertTrue(markdown.contains("<a id=\"cmt_x\"></a>"));
-        assertTrue(markdown.contains("> #### Style issue"));
-        assertTrue(markdown.contains("> * -2 points (ri_style)"));
+        assertTrue(markdown.contains("<!-- cmt-meta rubric:ri_style -->"));
+        assertTrue(markdown.contains("> #### -2 Style issue"));
+        assertFalse(markdown.contains("> * -2 points (ri_style)"));
         assertTrue(markdown.contains("> Line one"));
         assertTrue(markdown.contains("> Line two"));
         assertTrue(markdown.endsWith(System.lineSeparator() + System.lineSeparator()));
+    }
+
+    @Test
+    public void insertCanonicalCommentBlock_midLineMovesBlockToStandaloneLine() {
+        String base = "ABCD\nTail";
+        String block = "<a id=\"cmt_x\"></a>\n"
+                + "<!-- cmt-meta rubric:ri -->\n"
+                + "```\n"
+                + "> #### -1 Title\n"
+                + ">\n"
+                + "```\n\n";
+
+        GradingWindowController.InsertBlockResult result =
+                GradingWindowController.insertCanonicalCommentBlock(base, block, 2);
+
+        assertTrue(result.updatedText().contains("ABCD" + System.lineSeparator() + "<a id=\"cmt_x\"></a>"));
+        assertFalse(result.updatedText().contains("AB<a id=\"cmt_x\"></a>CD"));
+        assertTrue(result.updatedText().contains("```"));
+        assertTrue(result.caretAfterBlock() > result.updatedText().indexOf("<a id=\"cmt_x\"></a>"));
     }
 
     @Test
@@ -451,6 +471,32 @@ public class GradingWindowControllerTest {
         String twice = GradingWindowController.rebuildRubricAndSummaryText(once, editor);
 
         assertEquals(once.replaceAll(" +", " "), twice.replaceAll(" +", " "));
+    }
+
+    @Test
+    public void rebuildRubricAndSummaryText_mixedLegacyInlineAndCanonicalComments_appliesCombinedDeduction() {
+        GradingReportEditorService editor = new GradingReportEditorService(
+                buildSingleRubricAssignment(),
+                buildSingleRubricAssignmentsFile()
+        );
+        String initial = editor.buildFreshReportSkeleton("smith")
+                + "AB<a id=\"cmt_inline\"></a>CD\n"
+                + "```\n"
+                + "> #### Inline legacy\n"
+                + "> * -2 points (ri_impl)\n"
+                + "```\n"
+                + "\n"
+                + "<a id=\"cmt_canonical\"></a>\n"
+                + "```\n"
+                + "> #### Canonical\n"
+                + "> * -1 points (ri_impl)\n"
+                + "```\n";
+
+        String rebuilt = GradingWindowController.rebuildRubricAndSummaryText(initial, editor);
+
+        assertTrue(rebuilt.matches(
+                "(?s).*\\|\\s*7(?:\\.0+)?\\s*\\|\\s*10(?:\\.0+)?\\s*\\|\\s*Implementation\\b.*"
+        ));
     }
 
     @Test
@@ -555,6 +601,92 @@ public class GradingWindowControllerTest {
             }
             previous = text;
         }
+    }
+
+    @Test
+    public void rebuildCycle_sparseDraftWithoutFeedbackHeader_isIdempotentAfterFirstPass()
+            throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+        GradingReportEditorService editor = new GradingReportEditorService(
+                buildSingleRubricAssignment(),
+                buildSingleRubricAssignmentsFile()
+        );
+        setField(controller, "gradingReportEditorService", editor);
+
+        String text = """
+                # Assignment
+
+                <!-- RUBRIC_TABLE_BEGIN -->
+                >> | Earned | Possible | Criteria |
+                >> | --- | --- | --- |
+                >> | 10 | 10 | Implementation |
+                >> | 10 | 10 | TOTAL |
+                <!-- RUBRIC_TABLE_END -->
+
+                <!-- COMMENTS_SUMMARY_BEGIN -->
+                _No comments selected._
+                <!-- COMMENTS_SUMMARY_END -->
+
+                <a id="cmt_x"></a>
+                ```
+                > #### Title
+                > * -3 points (ri_impl)
+                ```
+                """;
+
+        List<model.Comments.ParsedComment> previousFirst = model.Comments.parseInjectedComments(text);
+        String canonicalFirst = (String) invokeMethod(
+                controller,
+                "normalizeRubricAndSummaryBlocks",
+                new Class<?>[] {String.class, String.class},
+                text,
+                "pkg1"
+        );
+        String rebuiltFirst = GradingWindowController.rebuildRubricAndSummaryText(
+                canonicalFirst,
+                previousFirst,
+                editor
+        );
+        String once = (String) invokeMethod(
+                controller,
+                "normalizeForLegacyEditorView",
+                new Class<?>[] {String.class},
+                rebuiltFirst
+        );
+        once = (String) invokeMethod(
+                controller,
+                "normalizeForLegacyEditorView",
+                new Class<?>[] {String.class},
+                once
+        );
+
+        List<model.Comments.ParsedComment> previousSecond = model.Comments.parseInjectedComments(once);
+        String canonicalSecond = (String) invokeMethod(
+                controller,
+                "normalizeRubricAndSummaryBlocks",
+                new Class<?>[] {String.class, String.class},
+                once,
+                "pkg1"
+        );
+        String rebuiltSecond = GradingWindowController.rebuildRubricAndSummaryText(
+                canonicalSecond,
+                previousSecond,
+                editor
+        );
+        String twice = (String) invokeMethod(
+                controller,
+                "normalizeForLegacyEditorView",
+                new Class<?>[] {String.class},
+                rebuiltSecond
+        );
+        twice = (String) invokeMethod(
+                controller,
+                "normalizeForLegacyEditorView",
+                new Class<?>[] {String.class},
+                twice
+        );
+
+        assertEquals(once.replaceAll(" +", " "), twice.replaceAll(" +", " "));
     }
 
     @Test

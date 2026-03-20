@@ -163,7 +163,7 @@ public class ReportService {
                 );
 
         if (feedbackMarkdown == null || feedbackMarkdown.isBlank()) {
-            feedbackMarkdown = "> * No feedback provided";
+            feedbackMarkdown = "> * Nice work";
         }
 
         String rubricTableMarkdown =

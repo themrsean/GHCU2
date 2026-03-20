@@ -270,26 +270,44 @@ public class Comments {
             String t = line.trim();
 
             // anchor line:
-            // <a id="cmt_..."></a>
-            if (t.startsWith("<a") && t.contains("id=\"") && t.contains("\"></a>")) {
-                int idIndex = t.indexOf("id=\"");
-                if (idIndex >= 0) {
-                    int start = idIndex + 4;
-                    int end = t.indexOf("\"", start);
-                    if (end > start) {
-                        lastAnchor = t.substring(start, end);
-                        lastTitle = null;
-                        lastRubric = null;
-                        lastLoss = null;
-                    }
-                }
+            // canonical: <a id="cmt_..."></a>
+            // legacy/edited: ...<a id="cmt_..."></a>...
+            String anchorId = extractAnchorId(t);
+            if (anchorId != null) {
+                lastAnchor = anchorId;
+                lastTitle = null;
+                String rubricFromMeta = extractRubricMeta(t);
+                lastRubric = rubricFromMeta;
+                lastLoss = null;
+                continue;
+            }
+
+            // metadata line for canonical injected comments:
+            // <!-- cmt-meta rubric:ri_impl -->
+            String rubricMeta = extractRubricMeta(t);
+            if (rubricMeta != null) {
+                lastRubric = rubricMeta;
                 continue;
             }
 
             // title line:
             // > #### Something
+            // > #### -4 Something
             if (t.startsWith("> ####")) {
-                lastTitle = t.substring("> ####".length()).trim();
+                String heading = t.substring("> ####".length()).trim();
+                if (heading.startsWith("-")) {
+                    int firstSpace = heading.indexOf(' ');
+                    if (firstSpace > 1) {
+                        String nText = heading.substring(1, firstSpace).trim();
+                        try {
+                            lastLoss = Integer.parseInt(nText);
+                            heading = heading.substring(firstSpace + 1).trim();
+                        } catch (NumberFormatException ignored) {
+                            // heading kept as-is for backward compatibility
+                        }
+                    }
+                }
+                lastTitle = heading;
                 continue;
             }
 
@@ -330,5 +348,41 @@ public class Comments {
         }
 
         return out;
+    }
+
+    private static String extractAnchorId(String line) {
+        if (line == null || line.isEmpty()) {
+            return null;
+        }
+        int anchorStart = line.indexOf("<a");
+        while (anchorStart >= 0) {
+            int idIndex = line.indexOf("id=\"", anchorStart);
+            if (idIndex < 0) {
+                return null;
+            }
+            int start = idIndex + 4;
+            int end = line.indexOf("\"", start);
+            if (end > start) {
+                return line.substring(start, end);
+            }
+            anchorStart = line.indexOf("<a", anchorStart + 2);
+        }
+        return null;
+    }
+
+    private static String extractRubricMeta(String line) {
+        if (line == null || line.isBlank()) {
+            return null;
+        }
+        String marker = "rubric:";
+        int markerIndex = line.indexOf(marker);
+        if (markerIndex < 0) {
+            return null;
+        }
+        int start = markerIndex + marker.length();
+        int end = line.indexOf("-->", start);
+        String raw = end > start ? line.substring(start, end) : line.substring(start);
+        String rubric = raw.trim();
+        return rubric.isEmpty() ? null : rubric;
     }
 }
