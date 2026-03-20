@@ -39,12 +39,14 @@ import model.Comments.CommentsStore;
 import model.Comments.ParsedComment;
 import service.GradingDraftService;
 import service.GradingDraftSessionService;
+import service.GradingMarkdownSections;
 import service.GradingMappingsService;
 import service.GradingReportEditorService;
 import service.GradingSyncService;
 import service.ReportHtmlWrapper;
 
 import java.io.IOException;
+import java.awt.Desktop;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -56,8 +58,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -71,6 +75,11 @@ import java.util.regex.Pattern;
  */
 public class GradingWindowController {
     private static final String COMMENT_ANCHOR_PREFIX = "cmt_";
+    private static final String COMMENTS_SUMMARY_BEGIN = "<!-- COMMENTS_SUMMARY_BEGIN -->";
+    private static final String COMMENTS_SUMMARY_END = "<!-- COMMENTS_SUMMARY_END -->";
+    private static final String RUBRIC_TABLE_BEGIN = "<!-- RUBRIC_TABLE_BEGIN -->";
+    private static final String RUBRIC_TABLE_END = "<!-- RUBRIC_TABLE_END -->";
+    private static final String FEEDBACK_HEADER = "> # Feedback";
     // --- Syntax highlighting (Java) ---
     private static final String[] KEYWORDS = new String[] {
             "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class",
@@ -137,6 +146,7 @@ public class GradingWindowController {
     private Path mappingsPath;
 
     private String assignmentId;
+    private String reportFilePrefix;
 
     private final ObservableList<String> studentPackages =
             FXCollections.observableArrayList();
@@ -148,16 +158,21 @@ public class GradingWindowController {
     private boolean isLoadingStudent = false;
     private boolean applyingHighlight = false;
     private boolean saveInProgress = false;
+    private SaveDraftWorker saveDraftWorker = this::saveDraftsWorker;
+    private PushAllWorker pushAllWorker = this::pushAllRepos;
 
     public void init(AssignmentsFile assignmentsFile, Assignment assignment, Path rootPath,
                      Path mappingsPath) {
-        System.out.println("GradingWindowController INIT running");
         this.assignmentsFile = assignmentsFile;
         this.assignment = assignment;
         this.rootPath = rootPath;
         this.mappingsPath = mappingsPath;
         // rootPath/packages
         this.assignmentId = assignment.getCourseCode() + assignment.getAssignmentCode();
+        this.reportFilePrefix = assignment.getAssignmentCode();
+        if (reportFilePrefix == null || reportFilePrefix.isBlank()) {
+            reportFilePrefix = assignmentId;
+        }
         this.gradingReportEditorService =
                 new GradingReportEditorService(assignment, assignmentsFile);
         status("Assignment ID = [" + assignmentId + "]");
@@ -274,21 +289,25 @@ public class GradingWindowController {
 
         final String text = reportEditor.getText() == null ? "" : reportEditor.getText();
 
-        CompletableFuture
-                .supplyAsync(() -> computeJavaHighlighting(text), highlightExecutor)
-                .thenAccept(spans -> Platform.runLater(() -> {
+        try {
+            CompletableFuture
+                    .supplyAsync(() -> computeJavaHighlighting(text), highlightExecutor)
+                    .thenAccept(spans -> Platform.runLater(() -> {
 
-                    if (!text.equals(reportEditor.getText())) {
-                        return;
-                    }
+                        if (!text.equals(reportEditor.getText())) {
+                            return;
+                        }
 
-                    applyingHighlight = true;
-                    try {
-                        reportEditor.setStyleSpans(0, spans);
-                    } finally {
-                        applyingHighlight = false;
-                    }
-                }));
+                        applyingHighlight = true;
+                        try {
+                            reportEditor.setStyleSpans(0, spans);
+                        } finally {
+                            applyingHighlight = false;
+                        }
+                    }));
+        } catch (RejectedExecutionException ignored) {
+            // Stage may be closing and the highlighter executor already shut down.
+        }
     }
 
     private StyleSpans<Collection<String>> computeJavaHighlighting(String text) {
@@ -356,6 +375,9 @@ public class GradingWindowController {
 
     private void restoreCaretAfterUpdate(String studentPackage, int caretToRestore) {
         Platform.runLater(() -> {
+            if (!Objects.equals(currentStudent, studentPackage)) {
+                return;
+            }
             int caret = Math.max(0, Math.min(caretToRestore, reportEditor.getLength()));
 
             suppressCaretEvents = true;
@@ -375,20 +397,22 @@ public class GradingWindowController {
         boolean needsReload = draftSessionService.needsReload(studentPackage);
         if (needsReload) {
             String md = loadInitialMarkdownForStudent(studentPackage);
-            md = normalizeRubricAndSummaryBlocks(md, studentPackage);
+            md = normalizeForLegacyEditorView(md);
             draftSessionService.setMarkdown(studentPackage, md);
             draftSessionService.setLoadedFromDisk(studentPackage, true);
+            // First load should always start at top of report.
+            draftSessionService.setCaretPosition(studentPackage, 0);
         }
         int desiredCaret = draftSessionService.getCaretPosition(studentPackage);
         setEditorTextPreservingCaret(
                 currentStudent,
                 draftSessionService.getMarkdown(studentPackage),
                 desiredCaret,
-                false
+                true
         );
 
         // rebuild modifies text; it must also restore caret again AFTER it finishes
-        rebuildRubricAndSummaryInEditor(desiredCaret, false);
+        rebuildRubricAndSummaryInEditor(desiredCaret, true);
         status("Editing: " + studentPackage);
     }
 
@@ -406,7 +430,7 @@ public class GradingWindowController {
 
         if (repoDir != null) {
             String markdown = gradingDraftService.loadReportMarkdown(
-                    assignmentId,
+                    effectiveReportFilePrefix(),
                     studentPackage,
                     repoDir
             );
@@ -479,48 +503,15 @@ public class GradingWindowController {
 
         int caret = reportEditor.getCaretPosition();
         String text = reportEditor.getText() == null ? "" : reportEditor.getText();
-
-        String anchorLine = "<a id=\"" + anchorId + "\"></a>";
-        int start = text.indexOf(anchorLine);
-
-        if (start < 0) {
+        RemovalResult result = removeInjectedCommentBlock(text, anchorId);
+        if (!result.found()) {
             status("Could not find comment anchor: " + anchorId);
             return;
         }
 
-        int cursor = start;
-
-        // move to end of anchor line
-        int lineEnd = text.indexOf("\n", cursor);
-        if (lineEnd < 0) {
-            lineEnd = text.length();
-        }
-        cursor = Math.min(text.length(), lineEnd + 1);
-
-        // scan forward until next comment anchor or end
-        boolean foundNextAnchor = false;
-        while (cursor < text.length() && !foundNextAnchor) {
-            if (text.startsWith("<a id=\"cmt_", cursor)) {
-                foundNextAnchor = true;
-            } else {
-                int nextLineEnd = text.indexOf("\n", cursor);
-                if (nextLineEnd < 0) {
-                    nextLineEnd = text.length();
-                }
-
-                String line = text.substring(cursor, nextLineEnd).trim();
-
-                // Comment body lines are blockquote lines or blank lines
-                if (line.isEmpty() || line.startsWith(">")) {
-                    cursor = Math.min(text.length(), nextLineEnd + 1);
-                } else {
-                    // hit real content -> stop deleting
-                    break;
-                }
-            }
-        }
-
-        String updated = text.substring(0, start) + text.substring(cursor);
+        String updated = result.updatedText();
+        int start = result.startIndex();
+        int cursor = result.endIndexExclusive();
 
         // compute caret after delete
         int desiredCaret = caret;
@@ -537,6 +528,47 @@ public class GradingWindowController {
         status("Removed comment.");
     }
 
+    static RemovalResult removeInjectedCommentBlock(String text, String anchorId) {
+        if (text == null || anchorId == null || anchorId.isBlank()) {
+            return new RemovalResult(text == null ? "" : text, false, -1, -1);
+        }
+
+        String anchorLine = "<a id=\"" + anchorId + "\"></a>";
+        int start = text.indexOf(anchorLine);
+        if (start < 0) {
+            return new RemovalResult(text, false, -1, -1);
+        }
+
+        int cursor = start;
+        int lineEnd = text.indexOf("\n", cursor);
+        if (lineEnd < 0) {
+            lineEnd = text.length();
+        }
+        cursor = Math.min(text.length(), lineEnd + 1);
+
+        boolean foundNextAnchor = false;
+        while (cursor < text.length() && !foundNextAnchor) {
+            if (text.startsWith("<a id=\"cmt_", cursor)) {
+                foundNextAnchor = true;
+            } else {
+                int nextLineEnd = text.indexOf("\n", cursor);
+                if (nextLineEnd < 0) {
+                    nextLineEnd = text.length();
+                }
+
+                String line = text.substring(cursor, nextLineEnd).trim();
+                if (line.isEmpty() || line.startsWith(">") || line.startsWith("```")) {
+                    cursor = Math.min(text.length(), nextLineEnd + 1);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        String updated = text.substring(0, start) + text.substring(cursor);
+        return new RemovalResult(updated, true, start, cursor);
+    }
+
     @FXML
     private void onRebuildSummary() {
         rebuildRubricAndSummaryInEditor(reportEditor.getCaretPosition(), false);
@@ -545,14 +577,22 @@ public class GradingWindowController {
 
     private void rebuildRubricAndSummaryInEditor(int caretToRestore, boolean centerCaret) {
         String text = reportEditor.getText() == null ? "" : reportEditor.getText();
-        List<ParsedComment> comments = Comments.parseInjectedComments(text);
-        String updated = gradingReportEditorService.rebuildRubricAndSummary(text, comments);
+        String canonical = normalizeRubricAndSummaryBlocks(text, currentStudent);
+        String updated = rebuildRubricAndSummaryText(canonical, gradingReportEditorService);
+        updated = normalizeForLegacyEditorView(updated);
         if (!updated.equals(text)) {
             setEditorTextPreservingCaret(currentStudent, updated, caretToRestore, centerCaret);
         } else {
             // Even if no text changed, still restore caret reliably.
             Platform.runLater(() -> restoreCaretAfterUpdate(currentStudent, caretToRestore));
         }
+    }
+
+    static String rebuildRubricAndSummaryText(String text,
+                                              GradingReportEditorService editorService) {
+        String safeText = text == null ? "" : text;
+        List<ParsedComment> comments = Comments.parseInjectedComments(safeText);
+        return editorService.rebuildRubricAndSummary(safeText, comments);
     }
 
     private CommentDef openCommentPicker() {
@@ -590,39 +630,10 @@ public class GradingWindowController {
         int maxForRubric = getMaxPointsForRubricItem(rubricId);
 
         int alreadyLost = computePointsLostInEditorForRubric(rubricId);
-        int remaining = Math.max(0, maxForRubric - alreadyLost);
-
-        int appliedLoss = Math.min(requestedLoss, remaining);
+        int appliedLoss = computeAppliedLoss(requestedLoss, maxForRubric, alreadyLost);
 
         String anchorId = makeAnchorIdFromComment(def);
-
-        StringBuilder injected = new StringBuilder();
-
-        injected.append("<a id=\"").append(anchorId).append("\"></a>")
-                .append(System.lineSeparator());
-
-        injected.append("```").append(System.lineSeparator());
-
-        injected.append("> #### ")
-                .append(def.getTitle() == null ? "" : def.getTitle().trim())
-                .append(System.lineSeparator());
-
-        injected.append("> * -")
-                .append(appliedLoss)
-                .append(" points (")
-                .append(rubricId)
-                .append(")")
-                .append(System.lineSeparator());
-
-        String body = def.getBodyMarkdown() == null ? "" : def.getBodyMarkdown().trim();
-        if (!body.isEmpty()) {
-            for (String line : body.split("\\R")) {
-                injected.append("> ").append(line).append(System.lineSeparator());
-            }
-        }
-
-        injected.append("```").append(System.lineSeparator());
-        injected.append(System.lineSeparator());
+        String injected = buildInjectedCommentMarkdown(def, anchorId, appliedLoss);
 
 
         int caret = reportEditor.getCaretPosition();
@@ -640,6 +651,45 @@ public class GradingWindowController {
         rebuildRubricAndSummaryInEditor(desiredCaret, false);
 
         status("Inserted comment: " + def.getCommentId() + " (-" + appliedLoss + ")");
+    }
+
+    static int computeAppliedLoss(int requestedLoss,
+                                  int maxForRubric,
+                                  int alreadyLost) {
+        int clampedRequested = Math.max(0, requestedLoss);
+        int remaining = Math.max(0, maxForRubric - alreadyLost);
+        return Math.min(clampedRequested, remaining);
+    }
+
+    static String buildInjectedCommentMarkdown(CommentDef def,
+                                               String anchorId,
+                                               int appliedLoss) {
+        String rubricId = def.getRubricItemId();
+        StringBuilder injected = new StringBuilder();
+
+        injected.append("<a id=\"").append(anchorId).append("\"></a>")
+                .append(System.lineSeparator());
+        injected.append("```").append(System.lineSeparator());
+        injected.append("> #### ")
+                .append(def.getTitle() == null ? "" : def.getTitle().trim())
+                .append(System.lineSeparator());
+        injected.append("> * -")
+                .append(appliedLoss)
+                .append(" points (")
+                .append(rubricId)
+                .append(")")
+                .append(System.lineSeparator());
+
+        String body = def.getBodyMarkdown() == null ? "" : def.getBodyMarkdown().trim();
+        if (!body.isEmpty()) {
+            for (String line : body.split("\\R")) {
+                injected.append("> ").append(line).append(System.lineSeparator());
+            }
+        }
+
+        injected.append("```").append(System.lineSeparator());
+        injected.append(System.lineSeparator());
+        return injected.toString();
     }
 
     private String makeAnchorIdFromComment(CommentDef def) {
@@ -672,27 +722,25 @@ public class GradingWindowController {
     }
 
     private int computePointsLostInEditorForRubric(String rubricItemId) {
+        String text = reportEditor.getText();
+        return computePointsLostInTextForRubric(text, rubricItemId);
+    }
+
+    static int computePointsLostInTextForRubric(String text, String rubricItemId) {
         if (rubricItemId == null || rubricItemId.trim().isEmpty()) {
             return 0;
         }
-
-        String text = reportEditor.getText();
         if (text == null || text.isEmpty()) {
             return 0;
         }
 
         int total = 0;
-
-        // matches:
-        // > * -10 points (ri_commits)
-        // > * -1 points (ri_style)
         String[] lines = text.split("\\R");
         for (String line : lines) {
             if (line == null) {
                 continue;
             }
             String t = line.trim();
-
             if (!t.startsWith(">")) {
                 continue;
             }
@@ -700,22 +748,20 @@ public class GradingWindowController {
                 continue;
             }
 
-            // Find "-N points"
             int dash = t.indexOf("-");
             int pointsWord = t.indexOf("points", dash);
-
             if (dash < 0 || pointsWord < 0) {
                 continue;
             }
 
-            String between = t.substring(dash + 1, pointsWord).trim(); // "10"
+            String between = t.substring(dash + 1, pointsWord).trim();
             try {
                 int n = Integer.parseInt(between);
                 if (n > 0) {
                     total += n;
                 }
             } catch (NumberFormatException ignored) {
-                // Should do nothing - will fix later
+                // malformed points are ignored
             }
         }
         return total;
@@ -743,9 +789,14 @@ public class GradingWindowController {
         });
 
         CompletableFuture
-                .supplyAsync(this::saveDraftsWorker, exec)
-                .thenAccept(result -> Platform.runLater(() ->
-                        handleSaveDraftResult(result, onComplete)))
+                .supplyAsync(saveDraftWorker::run, exec)
+                .whenComplete((result, throwable) -> Platform.runLater(() -> {
+                    if (throwable != null) {
+                        handleSaveDraftFailure(throwable);
+                    } else {
+                        handleSaveDraftResult(result, onComplete);
+                    }
+                }))
                 .whenComplete((_, _) -> exec.shutdown());
     }
 
@@ -758,6 +809,12 @@ public class GradingWindowController {
         if (result.success() && onComplete != null) {
             onComplete.run();
         }
+    }
+
+    private void handleSaveDraftFailure(Throwable throwable) {
+        saveInProgress = false;
+        setSaveUiDisabled(false);
+        status("Save failed: " + rootCauseMessage(throwable));
     }
 
     private void prepareCurrentDraftForSave() {
@@ -778,7 +835,7 @@ public class GradingWindowController {
                 this::loadInitialMarkdownForStudent,
                 this::findRepoDirForStudentPackage,
                 gradingDraftService,
-                assignmentId
+                effectiveReportFilePrefix()
         );
         return new SaveDraftResult(result.success(), result.message());
     }
@@ -830,27 +887,42 @@ public class GradingWindowController {
             return t;
         });
 
-        CompletableFuture.runAsync(() -> {
-            PushResult r = pushAllRepos();
-            Platform.runLater(() -> {
-                String message = "Save/push complete: pushed " + r.pushed +
-                        ", skipped " + r.skipped + ", failed " + r.failed + ".";
+        CompletableFuture
+                .supplyAsync(pushAllWorker::run, exec)
+                .whenComplete((result, throwable) -> Platform.runLater(() -> {
+                    if (throwable != null) {
+                        status("Save/push failed: " + rootCauseMessage(throwable));
+                    } else {
+                        status(formatPushCompletionMessage(
+                                result.pushed,
+                                result.skipped,
+                                result.failed,
+                                result.detailSummary
+                        ));
+                    }
+                    setSaveUiDisabled(false);
+                }))
+                .whenComplete((_, _) -> exec.shutdown());
+    }
 
-                if (!r.detailSummary.isBlank()) {
-                    message = message + " " + r.detailSummary;
-                }
+    static String formatPushCompletionMessage(int pushed,
+                                              int skipped,
+                                              int failed,
+                                              String detailSummary) {
+        String message = "Save/push complete: pushed " + pushed
+                + ", skipped " + skipped + ", failed " + failed + ".";
 
-                status(message);
-                setSaveUiDisabled(false);
-            });
-        }, exec).whenComplete((_, _) -> exec.shutdown());
+        if (detailSummary != null && !detailSummary.isBlank()) {
+            message = message + " " + detailSummary;
+        }
+        return message;
     }
 
     private PushResult pushAllRepos() {
         GradingSyncService.PushResult result = gradingSyncService.pushAllRepos(
                 new ArrayList<>(studentPackages),
                 this::findRepoDirForStudentPackage,
-                assignmentId
+                effectiveReportFilePrefix()
         );
         return new PushResult(
                 result.pushed(),
@@ -913,6 +985,12 @@ public class GradingWindowController {
         }
     }
 
+    record RemovalResult(String updatedText,
+                         boolean found,
+                         int startIndex,
+                         int endIndexExclusive) {
+    }
+
     private record PreflightResult(boolean allowed,
                                    String message) {
     }
@@ -967,6 +1045,18 @@ public class GradingWindowController {
         if (statusLabel != null) {
             statusLabel.setText(msg == null ? "" : msg);
         }
+    }
+
+    private String rootCauseMessage(Throwable throwable) {
+        Throwable current = throwable;
+        while (current instanceof CompletionException && current.getCause() != null) {
+            current = current.getCause();
+        }
+        String message = current == null ? null : current.getMessage();
+        if (message == null || message.isBlank()) {
+            return current == null ? "unknown failure" : current.getClass().getSimpleName();
+        }
+        return message;
     }
 
     private static Path appDataDir() {
@@ -1042,6 +1132,9 @@ public class GradingWindowController {
         suppressCaretEvents = false;
 
         Platform.runLater(() -> {
+            if (studentPackage != null && !Objects.equals(studentPackage, currentStudent)) {
+                return;
+            }
             int caret = Math.max(0, Math.min(caretToRestore, reportEditor.getLength()));
 
             suppressCaretEvents = true;
@@ -1075,13 +1168,13 @@ public class GradingWindowController {
             rebuildRubricAndSummaryInEditor(caret, false);
 
             String md = reportEditor.getText() == null ? "" : reportEditor.getText();
-            String title = assignmentId + currentStudent;
+            String title = previewTitle(effectiveReportFilePrefix(), currentStudent);
             String html = wrapMarkdownAsHtml(title, md);
 
             Path previewDir = appDataDir().resolve("preview");
             Files.createDirectories(previewDir);
 
-            Path out = previewDir.resolve(title + "_preview.html");
+            Path out = previewDir.resolve(previewFileName(title));
             Files.writeString(out, html, StandardCharsets.UTF_8);
 
             // MUST show window on FX thread
@@ -1090,14 +1183,15 @@ public class GradingWindowController {
                     openPreviewWindow(out);
                     status("Preview opened: " + out.getFileName());
                 } catch (Throwable t) {
-                    t.printStackTrace();
+                    if (tryOpenPreviewInSystemBrowser(out, t)) {
+                        return;
+                    }
                     status("Preview failed: " + t.getClass().getSimpleName() + ": " + t.getMessage());
                     showErrorDialog("Preview failed", t);
                 }
             });
 
         } catch (Throwable t) {
-            t.printStackTrace();
             status("Preview failed: " + t.getClass().getSimpleName() + ": " + t.getMessage());
             showErrorDialog("Preview failed", t);
         }
@@ -1124,7 +1218,7 @@ public class GradingWindowController {
             rebuildRubricAndSummaryInEditor(caret, false);
 
             String md = reportEditor.getText() == null ? "" : reportEditor.getText();
-            String title = assignmentId + currentStudent;
+            String title = previewTitle(effectiveReportFilePrefix(), currentStudent);
             String html = wrapMarkdownAsHtml(title, md);
 
             try {
@@ -1158,6 +1252,223 @@ public class GradingWindowController {
         stage.show();
     }
 
+    private boolean tryOpenPreviewInSystemBrowser(Path htmlPath, Throwable cause) {
+        try {
+            if (!Desktop.isDesktopSupported()) {
+                return false;
+            }
+            Desktop desktop = Desktop.getDesktop();
+            if (!desktop.isSupported(Desktop.Action.BROWSE)) {
+                return false;
+            }
+            desktop.browse(htmlPath.toUri());
+            status("Preview opened in system browser: " + htmlPath.getFileName()
+                    + " (embedded preview unavailable: "
+                    + cause.getClass().getSimpleName() + ")");
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    static String previewTitle(String assignmentId, String currentStudent) {
+        String safeAssignment = assignmentId == null ? "" : assignmentId;
+        String safeStudent = currentStudent == null ? "" : currentStudent;
+        return safeAssignment + safeStudent;
+    }
+
+    static String previewFileName(String title) {
+        return title + "_preview.html";
+    }
+
+    private String normalizeForLegacyEditorView(String markdown) {
+        String out = markdown == null ? "" : markdown;
+        out = replaceRubricPatchBlockWithRawTable(out);
+        out = GradingMarkdownSections.removeAllBlocks(
+                out,
+                COMMENTS_SUMMARY_BEGIN,
+                COMMENTS_SUMMARY_END
+        );
+        out = removeTotalRowFromRubricTable(out);
+        out = ensureRubricTableBeforeFeedback(out);
+        out = normalizeSpacingBetweenRubricAndFeedback(out);
+        out = normalizeSpacingAfterFeedbackBlock(out);
+        return out;
+    }
+
+    private String normalizeSpacingBetweenRubricAndFeedback(String markdown) {
+        if (markdown == null || markdown.isBlank()) {
+            return markdown;
+        }
+
+        final Pattern tableHeaderPattern = Pattern.compile(
+                "(?m)^[ \\t]*>>[ \\t]*\\|[ \\t]*Earned[ \\t]*\\|[ \\t]*Possible"
+                        + "[ \\t]*\\|[ \\t]*Criteria.*$"
+        );
+        final Pattern feedbackHeaderPattern = Pattern.compile(
+                "(?m)^[ \\t]*>[ \\t]*#[ \\t]*Feedback\\b.*$"
+        );
+
+        Matcher tableMatcher = tableHeaderPattern.matcher(markdown);
+        Matcher feedbackMatcher = feedbackHeaderPattern.matcher(markdown);
+        if (!tableMatcher.find() || !feedbackMatcher.find()) {
+            return markdown;
+        }
+
+        int tableStart = tableMatcher.start();
+        int feedbackStart = feedbackMatcher.start();
+        if (tableStart >= feedbackStart) {
+            return markdown;
+        }
+
+        int lineStart = markdown.lastIndexOf('\n', tableStart);
+        lineStart = lineStart < 0 ? 0 : lineStart + 1;
+
+        int cursor = lineStart;
+        while (cursor < markdown.length()) {
+            int nextLineBreak = markdown.indexOf('\n', cursor);
+            int lineEnd = nextLineBreak < 0 ? markdown.length() : nextLineBreak;
+            String line = markdown.substring(cursor, lineEnd).trim();
+            if (!line.startsWith(">> |")) {
+                break;
+            }
+            cursor = nextLineBreak < 0 ? markdown.length() : nextLineBreak + 1;
+        }
+        int tableEnd = cursor;
+        if (tableEnd >= feedbackStart) {
+            return markdown;
+        }
+
+        String before = markdown.substring(0, tableEnd).replaceFirst("(?s)\\R*\\z", "");
+        String after = markdown.substring(feedbackStart);
+        return before
+                + System.lineSeparator()
+                + ">"
+                + System.lineSeparator()
+                + ">"
+                + System.lineSeparator()
+                + after;
+    }
+
+    private String normalizeSpacingAfterFeedbackBlock(String markdown) {
+        if (markdown == null || markdown.isBlank()) {
+            return markdown;
+        }
+
+        final Pattern feedbackBlockPattern = Pattern.compile(
+                "(?m)(^[ \\t]*>[ \\t]*#[ \\t]*Feedback[^\\r\\n]*\\R"
+                        + "(?:^[ \\t]*>[^\\r\\n]*\\R)*)(\\R{3,})(?=\\S)"
+        );
+        Matcher matcher = feedbackBlockPattern.matcher(markdown);
+        if (!matcher.find()) {
+            return markdown;
+        }
+
+        String replacement = matcher.group(1)
+                + System.lineSeparator()
+                + System.lineSeparator();
+        return matcher.replaceFirst(Matcher.quoteReplacement(replacement));
+    }
+
+    private String replaceRubricPatchBlockWithRawTable(String text) {
+        String rubric = GradingMarkdownSections.extractBlockContentsOrNull(
+                text,
+                RUBRIC_TABLE_BEGIN,
+                RUBRIC_TABLE_END
+        );
+        if (rubric == null || rubric.isBlank()) {
+            return text;
+        }
+
+        int beginIndex = text.indexOf(RUBRIC_TABLE_BEGIN);
+        if (beginIndex < 0) {
+            return text;
+        }
+        int endIndex = text.indexOf(RUBRIC_TABLE_END, beginIndex + RUBRIC_TABLE_BEGIN.length());
+        if (endIndex < 0) {
+            return text;
+        }
+        int afterEnd = endIndex + RUBRIC_TABLE_END.length();
+        return text.substring(0, beginIndex)
+                + rubric.trim()
+                + text.substring(afterEnd);
+    }
+
+    private String removeTotalRowFromRubricTable(String text) {
+        if (text == null || text.isBlank()) {
+            return text;
+        }
+        String[] lines = text.split("\\R", -1);
+        StringBuilder sb = new StringBuilder();
+        for (String line : lines) {
+            String trimmed = line == null ? "" : line.trim();
+            if (trimmed.startsWith(">>") && trimmed.contains("| TOTAL |")) {
+                continue;
+            }
+            sb.append(line).append(System.lineSeparator());
+        }
+        return sb.toString().replaceFirst("(?s)\\R\\z", "");
+    }
+
+    private String ensureRubricTableBeforeFeedback(String markdown) {
+        if (markdown == null || markdown.isBlank()) {
+            return markdown;
+        }
+
+        int tableStart = markdown.indexOf(">> | Earned | Possible | Criteria");
+        int feedbackStart = markdown.indexOf(FEEDBACK_HEADER);
+        if (tableStart < 0 || feedbackStart < 0 || tableStart < feedbackStart) {
+            return markdown;
+        }
+
+        int lineStart = markdown.lastIndexOf('\n', tableStart);
+        lineStart = lineStart < 0 ? 0 : lineStart + 1;
+
+        int cursor = lineStart;
+        while (cursor < markdown.length()) {
+            int nextLineBreak = markdown.indexOf('\n', cursor);
+            int lineEnd = nextLineBreak < 0 ? markdown.length() : nextLineBreak;
+            String line = markdown.substring(cursor, lineEnd).trim();
+            if (!line.startsWith(">> |")) {
+                break;
+            }
+            cursor = nextLineBreak < 0 ? markdown.length() : nextLineBreak + 1;
+        }
+        int tableEnd = cursor;
+
+        String tableBlock = markdown.substring(lineStart, tableEnd).trim();
+        if (tableBlock.isBlank()) {
+            return markdown;
+        }
+
+        String withoutTable = markdown.substring(0, lineStart) + markdown.substring(tableEnd);
+
+        int headingEnd = withoutTable.indexOf('\n');
+        if (headingEnd < 0) {
+            return markdown;
+        }
+        int insertPos = headingEnd + 1;
+        while (insertPos < withoutTable.length()
+                && (withoutTable.charAt(insertPos) == '\n'
+                || withoutTable.charAt(insertPos) == '\r')) {
+            insertPos++;
+        }
+
+        return withoutTable.substring(0, insertPos)
+                + System.lineSeparator()
+                + tableBlock
+                + System.lineSeparator()
+                + System.lineSeparator()
+                + withoutTable.substring(insertPos);
+    }
+
+    private String effectiveReportFilePrefix() {
+        if (reportFilePrefix != null && !reportFilePrefix.isBlank()) {
+            return reportFilePrefix;
+        }
+        return assignmentId == null ? "" : assignmentId;
+    }
+
     private Path loadOrReconstructMappings() {
         Map<String, String> mapping = loadMappingsForUse();
         if (mapping.isEmpty()) {
@@ -1182,5 +1493,15 @@ public class GradingWindowController {
                 assignmentId,
                 appDataDir()
         );
+    }
+
+    @FunctionalInterface
+    interface SaveDraftWorker {
+        SaveDraftResult run();
+    }
+
+    @FunctionalInterface
+    interface PushAllWorker {
+        PushResult run();
     }
 }

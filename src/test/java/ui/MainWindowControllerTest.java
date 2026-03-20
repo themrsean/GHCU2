@@ -1,6 +1,7 @@
 package ui;
 
 import javafx.scene.control.MenuItem;
+import javafx.scene.control.ButtonType;
 import model.Assignment;
 import model.AssignmentsFile;
 import model.RubricItemDef;
@@ -35,6 +36,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MainWindowControllerTest {
@@ -487,6 +489,179 @@ class MainWindowControllerTest {
                         "gh classroom clone ..."
                 )
         );
+    }
+
+    @Test
+    void startReportsIfValid_returnsAbortWithoutDisablingOrStarting(@TempDir Path tmp) {
+        Assignment assignment = assignmentWithRubric("ri_code", 100);
+        AtomicBoolean disabled = new AtomicBoolean(false);
+        AtomicBoolean started = new AtomicBoolean(false);
+
+        String abortReason = MainWindowController.startReportsIfValid(
+                null,
+                assignment,
+                true,
+                () -> disabled.set(true),
+                () -> { },
+                (name, action) -> started.set(true)
+        );
+
+        assertEquals("Generate Reports aborted: Repository root is not set.", abortReason);
+        assertFalse(disabled.get());
+        assertFalse(started.get());
+
+        abortReason = MainWindowController.startReportsIfValid(
+                tmp,
+                assignment,
+                false,
+                () -> disabled.set(true),
+                () -> { },
+                (name, action) -> started.set(true)
+        );
+        assertEquals("Generate Reports aborted: Rubric total must be exactly 100 points.",
+                abortReason);
+    }
+
+    @Test
+    void startReportsIfValid_disablesMenusAndStartsReportsWorker(@TempDir Path tmp) {
+        Assignment assignment = assignmentWithRubric("ri_code", 100);
+        AtomicReference<Runnable> startedAction = new AtomicReference<>();
+        AtomicReference<String> startedName = new AtomicReference<>("");
+        List<String> calls = new ArrayList<>();
+
+        String abortReason = MainWindowController.startReportsIfValid(
+                tmp,
+                assignment,
+                true,
+                () -> calls.add("disable"),
+                () -> calls.add("worker"),
+                (name, action) -> {
+                    startedName.set(name);
+                    startedAction.set(action);
+                }
+        );
+
+        assertNull(abortReason);
+        assertEquals(List.of("disable"), calls);
+        assertEquals("reports-worker", startedName.get());
+        startedAction.get().run();
+        assertEquals(List.of("disable", "worker"), calls);
+    }
+
+    @Test
+    void mergeExpectedFilesForDrop_filtersDeduplicatesAndSorts() {
+        List<String> merged = MainWindowController.mergeExpectedFilesForDrop(
+                Arrays.asList("src/main/java/Existing.java", "Layout.fxml"),
+                Arrays.asList("NewFile.java", "notes.txt", "Layout.fxml", "z.fxml", null)
+        );
+
+        assertEquals(List.of("Existing.java", "Layout.fxml", "NewFile.java", "z.fxml"), merged);
+    }
+
+    @Test
+    void mergeExpectedFilesForDrop_handlesNullInputs() {
+        assertEquals(List.of(), MainWindowController.mergeExpectedFilesForDrop(null, null));
+        assertEquals(
+                List.of("A.fxml"),
+                MainWindowController.mergeExpectedFilesForDrop(null, List.of("A.fxml", "a.md"))
+        );
+    }
+
+    @Test
+    void selectedFilePath_andBrowseRootSetMessage_handleNullAndValid() {
+        assertNull(MainWindowController.selectedFilePath(null));
+        Path selected = MainWindowController.selectedFilePath(Path.of("/tmp/repos").toFile());
+        assertEquals(Path.of("/tmp/repos"), selected);
+        assertEquals("Repository root set to: /tmp/repos",
+                MainWindowController.browseRootSetMessage(Path.of("/tmp/repos")));
+    }
+
+    @Test
+    void exportAssignmentsAbortReason_reportsWhenAssignmentsMissing() {
+        assertEquals(
+                "No assignments loaded to export.",
+                MainWindowController.exportAssignmentsAbortReason(null)
+        );
+        assertNull(MainWindowController.exportAssignmentsAbortReason(new AssignmentsFile()));
+    }
+
+    @Test
+    void newEditDeleteAssignmentAbortReason_reportExpectedMessages() {
+        Assignment assignment = assignmentWithRubric("ri_code", 100);
+        AssignmentsFile file = new AssignmentsFile();
+
+        assertEquals(
+                "Cannot create assignment: failed to load/create assignments.json.",
+                MainWindowController.newAssignmentAbortReason(null)
+        );
+
+        file.setRubricItemLibrary(new HashMap<>());
+        assertEquals(
+                "Cannot create assignment: rubric item library is missing/empty.",
+                MainWindowController.newAssignmentAbortReason(file)
+        );
+
+        HashMap<String, RubricItemDef> rubricLibrary = new HashMap<>();
+        RubricItemDef def = new RubricItemDef();
+        def.setName("Code");
+        rubricLibrary.put("ri_code", def);
+        file.setRubricItemLibrary(rubricLibrary);
+        assertNull(MainWindowController.newAssignmentAbortReason(file));
+
+        assertEquals(
+                "Cannot create assignment: failed to load/create assignments.json.",
+                MainWindowController.editAssignmentAbortReason(null, assignment)
+        );
+        assertEquals(
+                "No assignment selected.",
+                MainWindowController.editAssignmentAbortReason(file, null)
+        );
+        assertNull(MainWindowController.editAssignmentAbortReason(file, assignment));
+
+        assertEquals(
+                "Cannot delete assignment: failed to load/create assignments.json.",
+                MainWindowController.deleteAssignmentAbortReason(null, assignment)
+        );
+        assertEquals(
+                "No assignment selected.",
+                MainWindowController.deleteAssignmentAbortReason(file, null)
+        );
+        assertNull(MainWindowController.deleteAssignmentAbortReason(file, assignment));
+    }
+
+    @Test
+    void editLibraryAbortReasons_reportExpectedMessages() {
+        Assignment assignment = assignmentWithRubric("ri_code", 100);
+        AssignmentsFile file = new AssignmentsFile();
+
+        assertEquals(
+                "Rubric Library edit aborted: No assignments file loaded.",
+                MainWindowController.editRubricLibraryAbortReason(null)
+        );
+        assertNull(MainWindowController.editRubricLibraryAbortReason(file));
+
+        assertEquals(
+                "Edit Comment Library aborted: No assignments file loaded.",
+                MainWindowController.editCommentLibraryAbortReason(null, assignment)
+        );
+        assertEquals(
+                "Edit Comment Library aborted: No assignment selected.",
+                MainWindowController.editCommentLibraryAbortReason(file, null)
+        );
+        assertNull(MainWindowController.editCommentLibraryAbortReason(file, assignment));
+    }
+
+    @Test
+    void shouldDeleteAssignment_returnsTrueOnlyForOkButton() {
+        assertTrue(MainWindowController.shouldDeleteAssignment(ButtonType.OK));
+        assertFalse(MainWindowController.shouldDeleteAssignment(ButtonType.CANCEL));
+    }
+
+    @Test
+    void invokeExit_invokesProvidedExitInvoker() {
+        AtomicInteger callCount = new AtomicInteger(0);
+        MainWindowController.invokeExit(callCount::incrementAndGet);
+        assertEquals(1, callCount.get());
     }
 
     @Test

@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class GradingReportEditorServiceTest {
@@ -104,6 +105,117 @@ public class GradingReportEditorServiceTest {
 
         assertTrue(compact.contains(">> | 7 | 10 | Implementation"));
         assertTrue(compact.contains(">> | 7 | 10 | TOTAL"));
+    }
+
+    @Test
+    public void normalizeRubricAndSummaryBlocks_deduplicatesMarkers_evenWithMalformedBlocks() {
+        GradingReportEditorService service = new GradingReportEditorService(
+                buildAssignment(),
+                buildAssignmentsFile()
+        );
+        String markdown = """
+                # Intro A1
+
+                <!-- RUBRIC_TABLE_BEGIN -->
+                >> | Earned | Possible | Criteria |
+                >> | --- | --- | --- |
+                >> | 10 | 10 | Implementation |
+                >> | 10 | 10 | TOTAL |
+                <!-- RUBRIC_TABLE_END -->
+
+                <!-- RUBRIC_TABLE_BEGIN -->
+                stale duplicate block with no end marker should be dropped
+
+                <!-- COMMENTS_SUMMARY_BEGIN -->
+                >> # Comments
+                >> * stale summary line
+                <!-- COMMENTS_SUMMARY_END -->
+
+                <!-- COMMENTS_SUMMARY_BEGIN -->
+                stale malformed summary begin only
+
+                > # Feedback
+                > * Keep this
+                """;
+
+        String normalized = service.normalizeRubricAndSummaryBlocks(markdown);
+
+        assertEquals(1, countOccurrences(normalized, "<!-- RUBRIC_TABLE_BEGIN -->"));
+        assertEquals(1, countOccurrences(normalized, "<!-- RUBRIC_TABLE_END -->"));
+        assertEquals(1, countOccurrences(normalized, "<!-- COMMENTS_SUMMARY_BEGIN -->"));
+        assertEquals(1, countOccurrences(normalized, "<!-- COMMENTS_SUMMARY_END -->"));
+        assertTrue(normalized.contains("> # Feedback"));
+        assertTrue(normalized.contains("> * Keep this"));
+    }
+
+    @Test
+    public void rebuildRubricAndSummary_preservesRubricLikeTableOutsideManagedBlock() {
+        GradingReportEditorService service = new GradingReportEditorService(
+                buildAssignment(),
+                buildAssignmentsFile()
+        );
+        String markdown = """
+                # Intro A1
+
+                <!-- RUBRIC_TABLE_BEGIN -->
+                >> | Earned | Possible | Criteria |
+                >> | --- | --- | --- |
+                >> | 10 | 10 | Implementation |
+                >> | 10 | 10 | TOTAL |
+                <!-- RUBRIC_TABLE_END -->
+
+                <!-- COMMENTS_SUMMARY_BEGIN -->
+                >> # Comments
+                >> * _No comments._
+                <!-- COMMENTS_SUMMARY_END -->
+
+                ## Notes
+                >> | Earned | Possible | Criteria |
+                >> | --- | --- | --- |
+                >> | 1 | 1 | This table is an instructor note |
+                """;
+
+        List<ParsedComment> comments = List.of(
+                new ParsedComment("cmt_1", "ri_impl", 2, "Minor issue")
+        );
+        String updated = service.rebuildRubricAndSummary(markdown, comments);
+
+        assertTrue(updated.contains("## Notes"));
+        assertTrue(updated.contains("This table is an instructor note"));
+        assertTrue(updated.contains("[Minor issue](#cmt_1) (-2 ri_impl)"));
+    }
+
+    @Test
+    public void rebuildRubricAndSummary_escapesSpecialCharsInCommentTitleAndAnchorLink() {
+        GradingReportEditorService service = new GradingReportEditorService(
+                buildAssignment(),
+                buildAssignmentsFile()
+        );
+        String initial = service.buildFreshReportSkeleton("smith");
+        List<ParsedComment> comments = List.of(
+                new ParsedComment("cmt_x-1", "ri_impl", 1, "Array [index] (bounds)")
+        );
+
+        String updated = service.rebuildRubricAndSummary(initial, comments);
+
+        assertTrue(updated.contains("[Array \\[index\\] \\(bounds\\)](#cmt_x-1) (-1 ri_impl)"));
+        assertTrue(updated.contains(">> # Comments"));
+    }
+
+    private int countOccurrences(String text, String token) {
+        if (text == null || token == null || token.isEmpty()) {
+            return 0;
+        }
+        int count = 0;
+        int index = 0;
+        while (index >= 0) {
+            index = text.indexOf(token, index);
+            if (index >= 0) {
+                count++;
+                index += token.length();
+            }
+        }
+        return count;
     }
 
     private Assignment buildAssignment() {

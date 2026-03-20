@@ -28,6 +28,7 @@ import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
 import javafx.stage.Modality;
 import javafx.stage.Stage;
+import javafx.stage.Window;
 import model.Assignment;
 import model.AssignmentsFile;
 import model.Comments.CommentsLibrary;
@@ -160,6 +161,14 @@ public class MainWindowController implements Initializable {
     private GitService gitService;
     private ReportHtmlWrapper reportHtmlWrapper;
     private ImportsService importsService;
+    private GradeWindowOpener gradeWindowOpener = this::openGradingWindow;
+    private ExitInvoker exitInvoker = Platform::exit;
+    private DirectoryDialogOpener directoryDialogOpener = DirectoryChooser::showDialog;
+    private FileOpenDialogOpener fileOpenDialogOpener = FileChooser::showOpenDialog;
+    private FileSaveDialogOpener fileSaveDialogOpener = FileChooser::showSaveDialog;
+    private DroppedFileNameExtractor droppedFileNameExtractor = files -> files.stream()
+            .map(File::getName)
+            .toList();
 
     // ============================================================
     // JAVA FX LIFECYCLE
@@ -362,25 +371,17 @@ public class MainWindowController implements Initializable {
                 Assignment a = assignmentCombo.getValue();
 
                 if (a != null && e.getDragboard().hasFiles()) {
-                    if (a.getExpectedFiles() == null) {
-                        a.setExpectedFiles(new ArrayList<>());
-                    }
-                    boolean addedAny = false;
-                    for (File f : e.getDragboard().getFiles()) {
-                        String name = f.getName();
-                        String lower = name.toLowerCase();
-                        if (!lower.endsWith(".java") && !lower.endsWith(".fxml")) {
-                            continue;
-                        }
-
-                        if (!a.getExpectedFiles().contains(name)) {
-                            a.getExpectedFiles().add(name);
-                            addedAny = true;
-                        }
-                    }
+                    List<String> before = a.getExpectedFiles();
+                    List<String> droppedNames = droppedFileNameExtractor.fileNamesFor(
+                            e.getDragboard().getFiles()
+                    );
+                    List<String> merged = mergeExpectedFilesForDrop(before, droppedNames);
+                    boolean addedAny = before == null
+                            ? !merged.isEmpty()
+                            : merged.size() != normalizedExpectedFiles(before).size();
 
                     if (addedAny) {
-                        normalizeExpectedFiles(a);
+                        a.setExpectedFiles(merged);
                         saveAssignmentsQuietly();
                         updateAssignmentSummary();
                     }
@@ -406,12 +407,12 @@ public class MainWindowController implements Initializable {
         DirectoryChooser chooser = new DirectoryChooser();
         chooser.setTitle("Select Empty Repository Root Folder");
 
-        File selectedDir = chooser.showDialog(rootPathField.getScene().getWindow());
-        if (selectedDir != null) {
-            Path selectedPath = selectedDir.toPath();
+        File selectedDir = directoryDialogOpener.open(chooser, windowOf(rootPathField));
+        Path selectedPath = selectedFilePath(selectedDir);
+        if (selectedPath != null) {
             selectedRootPath = selectedPath;
             rootPathField.setText(selectedPath.toString());
-            logInfo("Repository root set to: " + selectedPath);
+            logInfo(browseRootSetMessage(selectedPath));
             if (assignmentsFile == null) {
                 ensureAssignmentsLoaded();
             }
@@ -425,7 +426,7 @@ public class MainWindowController implements Initializable {
 
     @FXML
     private void onExit() {
-        Platform.exit();
+        invokeExit(exitInvoker);
     }
 
     @FXML
@@ -435,7 +436,7 @@ public class MainWindowController implements Initializable {
         chooser.getExtensionFilters().add(
                 new FileChooser.ExtensionFilter("JSON Files", "*.json")
         );
-        File file = chooser.showOpenDialog(assignmentCombo.getScene().getWindow());
+        File file = fileOpenDialogOpener.open(chooser, windowOf(assignmentCombo));
         if (file != null) {
             Path path = file.toPath();
             try {
@@ -457,7 +458,7 @@ public class MainWindowController implements Initializable {
                 new FileChooser.ExtensionFilter("JSON Files", "*.json")
         );
 
-        File file = chooser.showSaveDialog(assignmentCombo.getScene().getWindow());
+        File file = fileSaveDialogOpener.save(chooser, windowOf(assignmentCombo));
         if (file != null) {
             Path path = file.toPath();
             try {
@@ -465,7 +466,7 @@ public class MainWindowController implements Initializable {
                     assignmentsStore.save(path, assignmentsFile);
                     logInfo("Exported assignments to: " + path);
                 } else {
-                    logInfo("No assignments loaded to export.");
+                    logInfo(exportAssignmentsAbortReason(assignmentsFile));
                 }
             } catch (IOException e) {
                 logInfo("Failed to export assignments: " + e.getMessage());
@@ -478,11 +479,9 @@ public class MainWindowController implements Initializable {
         if (assignmentsFile == null) {
             ensureAssignmentsLoaded();
         }
-        if (assignmentsFile == null) {
-            logInfo("Cannot create assignment: failed to load/create assignments.json.");
-        } else if (assignmentsFile.getRubricItemLibrary() == null
-                || assignmentsFile.getRubricItemLibrary().isEmpty()) {
-            logInfo("Cannot create assignment: rubric item library is missing/empty.");
+        String abortReason = newAssignmentAbortReason(assignmentsFile);
+        if (abortReason != null) {
+            logInfo(abortReason);
         } else {
             Assignment created = openAssignmentEditor(null);
             if (created != null) {
@@ -505,33 +504,30 @@ public class MainWindowController implements Initializable {
         if (assignmentsFile == null) {
             ensureAssignmentsLoaded();
         }
-        if (assignmentsFile == null) {
-            logInfo("Cannot create assignment: failed to load/create assignments.json.");
+        Assignment selected = assignmentCombo.getValue();
+        String abortReason = editAssignmentAbortReason(assignmentsFile, selected);
+        if (abortReason != null) {
+            logInfo(abortReason);
         } else {
-            Assignment selected = assignmentCombo.getValue();
-            if (selected == null) {
-                logInfo("No assignment selected.");
-            } else {
-                Assignment edited = openAssignmentEditor(selected);
-                if (edited != null) {
-                    normalizeExpectedFiles(edited);
-                    if (assignmentsFile.getAssignments() != null) {
-                        boolean found = false;
-                        for (int i = 0; i < assignmentsFile.getAssignments().size()
-                                && !found; i++) {
-                            Assignment a = assignmentsFile.getAssignments().get(i);
-                            if (a != null && a.getKey().equals(selected.getKey())) {
-                                assignmentsFile.getAssignments().set(i, edited);
-                                found = true;
-                            }
+            Assignment edited = openAssignmentEditor(selected);
+            if (edited != null) {
+                normalizeExpectedFiles(edited);
+                if (assignmentsFile.getAssignments() != null) {
+                    boolean found = false;
+                    for (int i = 0; i < assignmentsFile.getAssignments().size()
+                            && !found; i++) {
+                        Assignment a = assignmentsFile.getAssignments().get(i);
+                        if (a != null && a.getKey().equals(selected.getKey())) {
+                            assignmentsFile.getAssignments().set(i, edited);
+                            found = true;
                         }
                     }
-                    populateAssignmentCombo();
-                    assignmentCombo.getSelectionModel().select(edited);
-                    logInfo("Edited assignment: " + edited.getKey());
-                    updateUiState();
-                    saveAssignmentsQuietly();
                 }
+                populateAssignmentCombo();
+                assignmentCombo.getSelectionModel().select(edited);
+                logInfo("Edited assignment: " + edited.getKey());
+                updateUiState();
+                saveAssignmentsQuietly();
             }
         }
     }
@@ -541,36 +537,34 @@ public class MainWindowController implements Initializable {
         if (assignmentsFile == null) {
             ensureAssignmentsLoaded();
         }
-        if (assignmentsFile == null) {
-            logInfo("Cannot delete assignment: failed to load/create assignments.json.");
+        Assignment selected = assignmentCombo.getValue();
+        String abortReason = deleteAssignmentAbortReason(assignmentsFile, selected);
+        if (abortReason != null) {
+            logInfo(abortReason);
         } else {
-            Assignment selected = assignmentCombo.getValue();
-            if (selected == null) {
-                logInfo("No assignment selected.");
-            } else {
-                Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
-                alert.setTitle("Delete Assignment");
-                alert.setHeaderText("Delete assignment?");
-                alert.setContentText(selected.getKey() + " - " + selected.getAssignmentName());
-                ButtonType result = alert.showAndWait().orElse(ButtonType.CANCEL);
-                if (result == ButtonType.OK) {
-                    if (assignmentsFile.getAssignments() != null) {
-                        assignmentsFile.getAssignments().removeIf(a ->
-                                a != null && a.getKey().equals(selected.getKey()));
-                        saveAssignmentsQuietly();
-                    }
-                    populateAssignmentCombo();
-                    logInfo("Deleted assignment: " + selected.getKey());
-                    updateUiState();
+            Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
+            alert.setTitle("Delete Assignment");
+            alert.setHeaderText("Delete assignment?");
+            alert.setContentText(selected.getKey() + " - " + selected.getAssignmentName());
+            ButtonType result = alert.showAndWait().orElse(ButtonType.CANCEL);
+            if (shouldDeleteAssignment(result)) {
+                if (assignmentsFile.getAssignments() != null) {
+                    assignmentsFile.getAssignments().removeIf(a ->
+                            a != null && a.getKey().equals(selected.getKey()));
+                    saveAssignmentsQuietly();
                 }
+                populateAssignmentCombo();
+                logInfo("Deleted assignment: " + selected.getKey());
+                updateUiState();
             }
         }
     }
 
     @FXML
     private void onEditRubricLibrary() {
-        if (assignmentsFile == null) {
-            logInfo("Rubric Library edit aborted: No assignments file loaded.");
+        String abortReason = editRubricLibraryAbortReason(assignmentsFile);
+        if (abortReason != null) {
+            logInfo(abortReason);
         } else {
             try {
                 FXMLLoader loader = new FXMLLoader(getClass()
@@ -600,25 +594,22 @@ public class MainWindowController implements Initializable {
 
     @FXML
     private void onEditCommentLibrary() {
-        if (assignmentsFile == null) {
-            logInfo("Edit Comment Library aborted: No assignments file loaded.");
+        Assignment selected = assignmentCombo.getValue();
+        String abortReason = editCommentLibraryAbortReason(assignmentsFile, selected);
+        if (abortReason != null) {
+            logInfo(abortReason);
         } else {
-            Assignment selected = assignmentCombo.getValue();
-            if (selected == null) {
-                logInfo("Edit Comment Library aborted: No assignment selected.");
-            } else {
-                if (commentsLibrary == null) {
-                    commentsLibrary = CommentsLibrary.newEmpty();
-                }
-                openCommentLibraryEditor(selected);
-                try {
-                    commentsStore.save(commentsPath, commentsLibrary);
-                    logInfo("Saved comment library: " + commentsPath.toAbsolutePath());
-                } catch (IOException e) {
-                    logInfo("Failed to save comments.json: " + e.getMessage());
-                }
-                updateUiState();
+            if (commentsLibrary == null) {
+                commentsLibrary = CommentsLibrary.newEmpty();
             }
+            openCommentLibraryEditor(selected);
+            try {
+                commentsStore.save(commentsPath, commentsLibrary);
+                logInfo("Saved comment library: " + commentsPath.toAbsolutePath());
+            } catch (IOException e) {
+                logInfo("Failed to save comments.json: " + e.getMessage());
+            }
+            updateUiState();
         }
     }
 
@@ -702,27 +693,27 @@ public class MainWindowController implements Initializable {
 
     @FXML
     private void onGenerateReports() {
-        String abortReason = reportsAbortReason(
+        Assignment selected = assignmentCombo.getValue();
+        String abortReason = startReportsIfValid(
                 selectedRootPath,
-                assignmentCombo.getValue(),
-                isSelectedAssignmentRubricValid()
+                selected,
+                isSelectedAssignmentRubricValid(),
+                () -> {
+                    if (reportsMenuItem != null) {
+                        reportsMenuItem.setDisable(true);
+                    }
+                    if (runAllMenuItem != null) {
+                        runAllMenuItem.setDisable(true);
+                    }
+                },
+                () -> {
+                    generateReportsWorker(selected);
+                    Platform.runLater(this::updateUiState);
+                },
+                MainWindowController::startDaemonThread
         );
         if (abortReason != null) {
             logInfo(abortReason);
-        } else {
-            if (reportsMenuItem != null) {
-                reportsMenuItem.setDisable(true);
-            }
-            if (runAllMenuItem != null) {
-                runAllMenuItem.setDisable(true);
-            }
-            Assignment selected = assignmentCombo.getValue();
-            Thread worker = new Thread(() -> {
-                generateReportsWorker(selected);
-                Platform.runLater(this::updateUiState);
-            }, "reports-worker");
-            worker.setDaemon(true);
-            worker.start();
         }
     }
 
@@ -885,25 +876,7 @@ public class MainWindowController implements Initializable {
         } else {
             Assignment selected = assignmentCombo.getValue();
             try {
-                FXMLLoader loader = new FXMLLoader(getClass()
-                        .getResource("/ui/GradingWindow.fxml"));
-                Scene scene = new Scene(loader.load());
-                GradingWindowController controller = loader.getController();
-                controller.init(assignmentsFile, selected, selectedRootPath, mappingsPath);
-                Stage stage = new Stage();
-                stage.setTitle("Grade: " + selected.getCourseCode() + " "
-                        + selected.getAssignmentCode());
-                stage.initOwner(assignmentCombo.getScene().getWindow());
-                assignmentCombo.getScene().getStylesheets().add(
-                        Objects.requireNonNull(getClass().getResource("/ui/grading.css"))
-                                .toExternalForm());
-                stage.initModality(Modality.NONE);
-                stage.setScene(scene);
-                final int width = 900;
-                final int height = 600;
-                stage.setMinWidth(width);
-                stage.setMinHeight(height);
-                stage.show();
+                gradeWindowOpener.open(selected);
                 logInfo("Opened grading window for: " + selected.getKey());
             } catch (IOException e) {
                 logInfo("Failed to open grading window: " + e.getMessage());
@@ -914,6 +887,27 @@ public class MainWindowController implements Initializable {
                 }
             }
         }
+    }
+
+    private void openGradingWindow(Assignment selected) throws IOException {
+        FXMLLoader loader = new FXMLLoader(getClass()
+                .getResource("/ui/GradingWindow.fxml"));
+        Scene scene = new Scene(loader.load());
+        GradingWindowController controller = loader.getController();
+        controller.init(assignmentsFile, selected, selectedRootPath, mappingsPath);
+        Stage stage = new Stage();
+        stage.setTitle("Grade: " + selected.getCourseCode() + " "
+                + selected.getAssignmentCode());
+        assignmentCombo.getScene().getStylesheets().add(
+                Objects.requireNonNull(getClass().getResource("/ui/grading.css"))
+                        .toExternalForm());
+        stage.initModality(Modality.NONE);
+        stage.setScene(scene);
+        final int width = 900;
+        final int height = 600;
+        stage.setMinWidth(width);
+        stage.setMinHeight(height);
+        stage.show();
     }
 
     @FXML
@@ -1323,6 +1317,131 @@ public class MainWindowController implements Initializable {
         return null;
     }
 
+    static String startReportsIfValid(Path rootPath,
+                                      Assignment assignment,
+                                      boolean rubricValid,
+                                      Runnable disableMenusAction,
+                                      Runnable reportsWorkerAction,
+                                      ThreadStarter threadStarter) {
+        String abortReason = reportsAbortReason(rootPath, assignment, rubricValid);
+        if (abortReason != null) {
+            return abortReason;
+        }
+        disableMenusAction.run();
+        threadStarter.start("reports-worker", reportsWorkerAction);
+        return null;
+    }
+
+    static List<String> mergeExpectedFilesForDrop(List<String> existingExpectedFiles,
+                                                  List<String> droppedFileNames) {
+        List<String> merged = new ArrayList<>();
+        if (existingExpectedFiles != null) {
+            merged.addAll(normalizedExpectedFiles(existingExpectedFiles));
+        }
+        if (droppedFileNames == null) {
+            return merged;
+        }
+        for (String fileName : droppedFileNames) {
+            if (fileName == null) {
+                continue;
+            }
+            String trimmed = fileName.trim();
+            String lower = trimmed.toLowerCase();
+            if (!lower.endsWith(".java") && !lower.endsWith(".fxml")) {
+                continue;
+            }
+            if (!merged.contains(trimmed)) {
+                merged.add(trimmed);
+            }
+        }
+        merged.sort(String::compareTo);
+        return merged;
+    }
+
+    static Path selectedFilePath(File file) {
+        if (file == null) {
+            return null;
+        }
+        return file.toPath();
+    }
+
+    static String browseRootSetMessage(Path selectedPath) {
+        return "Repository root set to: " + selectedPath;
+    }
+
+    static String exportAssignmentsAbortReason(AssignmentsFile assignments) {
+        if (assignments == null) {
+            return "No assignments loaded to export.";
+        }
+        return null;
+    }
+
+    static String newAssignmentAbortReason(AssignmentsFile assignments) {
+        if (assignments == null) {
+            return "Cannot create assignment: failed to load/create assignments.json.";
+        }
+        if (assignments.getRubricItemLibrary() == null
+                || assignments.getRubricItemLibrary().isEmpty()) {
+            return "Cannot create assignment: rubric item library is missing/empty.";
+        }
+        return null;
+    }
+
+    static String editAssignmentAbortReason(AssignmentsFile assignments,
+                                            Assignment selectedAssignment) {
+        if (assignments == null) {
+            return "Cannot create assignment: failed to load/create assignments.json.";
+        }
+        if (selectedAssignment == null) {
+            return "No assignment selected.";
+        }
+        return null;
+    }
+
+    static String deleteAssignmentAbortReason(AssignmentsFile assignments,
+                                              Assignment selectedAssignment) {
+        if (assignments == null) {
+            return "Cannot delete assignment: failed to load/create assignments.json.";
+        }
+        if (selectedAssignment == null) {
+            return "No assignment selected.";
+        }
+        return null;
+    }
+
+    static String editRubricLibraryAbortReason(AssignmentsFile assignments) {
+        if (assignments == null) {
+            return "Rubric Library edit aborted: No assignments file loaded.";
+        }
+        return null;
+    }
+
+    static String editCommentLibraryAbortReason(AssignmentsFile assignments,
+                                                Assignment selectedAssignment) {
+        if (assignments == null) {
+            return "Edit Comment Library aborted: No assignments file loaded.";
+        }
+        if (selectedAssignment == null) {
+            return "Edit Comment Library aborted: No assignment selected.";
+        }
+        return null;
+    }
+
+    static boolean shouldDeleteAssignment(ButtonType result) {
+        return result == ButtonType.OK;
+    }
+
+    static void invokeExit(ExitInvoker invoker) {
+        invoker.exit();
+    }
+
+    private static Window windowOf(Node node) {
+        if (node == null || node.getScene() == null) {
+            return null;
+        }
+        return node.getScene().getWindow();
+    }
+
     record UiState(boolean pullEnabled,
                    boolean extractEnabled,
                    boolean importsEnabled,
@@ -1359,6 +1478,36 @@ public class MainWindowController implements Initializable {
         default void runLater(Runnable action) {
             accept(action);
         }
+    }
+
+    @FunctionalInterface
+    interface GradeWindowOpener {
+        void open(Assignment assignment) throws IOException;
+    }
+
+    @FunctionalInterface
+    interface ExitInvoker {
+        void exit();
+    }
+
+    @FunctionalInterface
+    interface DirectoryDialogOpener {
+        File open(DirectoryChooser chooser, Window owner);
+    }
+
+    @FunctionalInterface
+    interface FileOpenDialogOpener {
+        File open(FileChooser chooser, Window owner);
+    }
+
+    @FunctionalInterface
+    interface FileSaveDialogOpener {
+        File save(FileChooser chooser, Window owner);
+    }
+
+    @FunctionalInterface
+    interface DroppedFileNameExtractor {
+        List<String> fileNamesFor(List<File> files);
     }
 
     public UnitTestService getUnitTestService() {

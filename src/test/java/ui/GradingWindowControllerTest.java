@@ -1,8 +1,16 @@
 package ui;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import model.Comments.CommentDef;
+import model.Assignment;
+import model.AssignmentsFile;
+import model.RubricItemDef;
+import model.RubricItemRef;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import service.GradingReportEditorService;
+import service.GradingDraftService;
+import service.ReportHtmlWrapper;
 
 import java.io.IOException;
 import java.lang.reflect.Constructor;
@@ -11,6 +19,7 @@ import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -287,6 +296,481 @@ public class GradingWindowControllerTest {
         assertEquals("one; two; three", summary);
     }
 
+    @Test
+    public void saveAndExportPath_saveThenPush_reportsSingleSuccessfulPush(@TempDir Path tmp)
+            throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+        Path repoDir = createRepoWithUpstream(tmp);
+        Path mappingFile = tmp.resolve("mappings.json");
+        writeMappingFile(mappingFile, Map.of("pkg1", repoDir.toString()));
+
+        setField(controller, "assignmentId", "A1");
+        setField(controller, "mappingsPath", mappingFile);
+
+        addStudentPackage(controller, "pkg1");
+        putDraft(controller, "pkg1", "# Feedback", true);
+
+        Object saveResult = invokeMethod(controller, "saveDraftsWorker");
+        assertTrue(readBoolean(saveResult, "success"));
+        assertEquals(
+                "Saved 1 HTML report(s) to student repositories.",
+                readString(saveResult, "message")
+        );
+
+        Object pushResult = invokeMethod(controller, "pushAllRepos");
+        assertEquals(1, readIntField(pushResult, "pushed"));
+        assertEquals(0, readIntField(pushResult, "skipped"));
+        assertEquals(0, readIntField(pushResult, "failed"));
+        assertEquals("", readStringField(pushResult, "detailSummary"));
+    }
+
+    @Test
+    public void saveDraftsWorker_currentStudentMissingRepo_reportsFailure(@TempDir Path tmp)
+            throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+        Path validRepo = tmp.resolve("repo-valid");
+        Files.createDirectories(validRepo);
+        Path mappingFile = tmp.resolve("mappings.json");
+        writeMappingFile(mappingFile, Map.of("pkgOther", validRepo.toString()));
+
+        setField(controller, "assignmentId", "A1");
+        setField(controller, "mappingsPath", mappingFile);
+        setField(controller, "currentStudent", "pkgMissing");
+
+        addStudentPackage(controller, "pkgMissing");
+        putDraft(controller, "pkgMissing", "# Missing", true);
+
+        Object result = invokeMethod(controller, "saveDraftsWorker");
+
+        assertFalse(readBoolean(result, "success"));
+        assertEquals("Could not find repo for pkgMissing", readString(result, "message"));
+    }
+
+    @Test
+    public void formatPushCompletionMessage_includesDetailOnlyWhenPresent() {
+        String withDetails = GradingWindowController.formatPushCompletionMessage(
+                1,
+                2,
+                3,
+                "pkg1: report file missing"
+        );
+        assertEquals(
+                "Save/push complete: pushed 1, skipped 2, failed 3. pkg1: report file missing",
+                withDetails
+        );
+
+        String withoutDetails = GradingWindowController.formatPushCompletionMessage(
+                1,
+                0,
+                0,
+                ""
+        );
+        assertEquals("Save/push complete: pushed 1, skipped 0, failed 0.", withoutDetails);
+    }
+
+    @Test
+    public void computeAppliedLoss_clampsToRemainingRubricPoints() {
+        assertEquals(3, GradingWindowController.computeAppliedLoss(3, 10, 2));
+        assertEquals(8, GradingWindowController.computeAppliedLoss(12, 10, 2));
+        assertEquals(0, GradingWindowController.computeAppliedLoss(-5, 10, 2));
+        assertEquals(0, GradingWindowController.computeAppliedLoss(5, 4, 7));
+    }
+
+    @Test
+    public void buildInjectedCommentMarkdown_formatsAnchorHeaderDeductionAndBody() {
+        CommentDef def = new CommentDef();
+        def.setRubricItemId("ri_style");
+        def.setTitle("Style issue");
+        def.setBodyMarkdown("Line one\nLine two");
+
+        String markdown = GradingWindowController.buildInjectedCommentMarkdown(def, "cmt_x", 2);
+
+        assertTrue(markdown.contains("<a id=\"cmt_x\"></a>"));
+        assertTrue(markdown.contains("> #### Style issue"));
+        assertTrue(markdown.contains("> * -2 points (ri_style)"));
+        assertTrue(markdown.contains("> Line one"));
+        assertTrue(markdown.contains("> Line two"));
+        assertTrue(markdown.endsWith(System.lineSeparator() + System.lineSeparator()));
+    }
+
+    @Test
+    public void removeInjectedCommentBlock_removesOnlyTargetAnchorBlock() {
+        String text = """
+                Intro
+                <a id="cmt_one"></a>
+                ```
+                > #### One
+                > * -2 points (ri_a)
+                > body
+                ```
+
+                <a id="cmt_two"></a>
+                ```
+                > #### Two
+                > * -1 points (ri_b)
+                ```
+
+                Tail
+                """;
+
+        GradingWindowController.RemovalResult result =
+                GradingWindowController.removeInjectedCommentBlock(text, "cmt_one");
+
+        assertTrue(result.found());
+        assertFalse(result.updatedText().contains("<a id=\"cmt_one\"></a>"));
+        assertTrue(result.updatedText().contains("<a id=\"cmt_two\"></a>"));
+        assertTrue(result.updatedText().contains("Tail"));
+    }
+
+    @Test
+    public void removeInjectedCommentBlock_returnsNotFoundWhenAnchorMissing() {
+        String text = "No anchors here";
+        GradingWindowController.RemovalResult result =
+                GradingWindowController.removeInjectedCommentBlock(text, "cmt_missing");
+
+        assertFalse(result.found());
+        assertEquals(text, result.updatedText());
+        assertEquals(-1, result.startIndex());
+        assertEquals(-1, result.endIndexExclusive());
+    }
+
+    @Test
+    public void rebuildRubricAndSummaryText_isIdempotentForUnchangedComments() {
+        GradingReportEditorService editor = new GradingReportEditorService(
+                buildSingleRubricAssignment(),
+                buildSingleRubricAssignmentsFile()
+        );
+        String initial = editor.buildFreshReportSkeleton("smith")
+                + "<a id=\"cmt_1\"></a>\n"
+                + "```\n"
+                + "> #### Missing semicolon\n"
+                + "> * -3 points (ri_impl)\n"
+                + "```\n";
+
+        String once = GradingWindowController.rebuildRubricAndSummaryText(initial, editor);
+        String twice = GradingWindowController.rebuildRubricAndSummaryText(once, editor);
+
+        assertEquals(once.replaceAll(" +", " "), twice.replaceAll(" +", " "));
+    }
+
+    @Test
+    public void normalizeForLegacyEditorView_doesNotAccumulateBlankLinesNearFeedback()
+            throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+        String input = """
+                # Lab Assignment 1 - Sample
+
+                <!-- RUBRIC_TABLE_BEGIN -->
+                >> | Earned | Possible | Criteria                                          |
+                >> | ------ | -------- | ------------------------------------------------- |
+                >> |   10   |     10   | Intermediate Commits                              |
+                <!-- RUBRIC_TABLE_END -->
+
+                <!-- COMMENTS_SUMMARY_BEGIN -->
+                >> # Comments
+                >>
+                >> * _No comments._
+                <!-- COMMENTS_SUMMARY_END -->
+
+                > # Feedback
+                > * Nice work!
+                """;
+
+        String once = (String) invokeMethod(
+                controller,
+                "normalizeForLegacyEditorView",
+                new Class<?>[] {String.class},
+                input
+        );
+        String twice = (String) invokeMethod(
+                controller,
+                "normalizeForLegacyEditorView",
+                new Class<?>[] {String.class},
+                once
+        );
+
+        assertEquals(once, twice);
+        String canonicalGap = System.lineSeparator()
+                + ">"
+                + System.lineSeparator()
+                + ">"
+                + System.lineSeparator()
+                + "> # Feedback";
+        assertTrue(once.contains(canonicalGap));
+    }
+
+    @Test
+    public void rebuildCycle_doesNotAccumulateQuotedBlankLinesBeforeFeedback()
+            throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+        GradingReportEditorService editor = new GradingReportEditorService(
+                buildSingleRubricAssignment(),
+                buildSingleRubricAssignmentsFile()
+        );
+        setField(controller, "gradingReportEditorService", editor);
+
+        String text = """
+                # Lab Assignment 6 - AutoCompleter
+                >
+                >
+                > # Feedback
+                > * No feedback provided
+
+
+                >> | Earned | Possible | Criteria                                          |
+                >> | ------ | -------- | ------------------------------------------------- |
+                >> |     15 |       15 | CheckStyle Errors |
+                >> |     10 |       10 | Intermediate Commits |
+                >> |     55 |       55 | Code Implementation and Structure |
+                >> |  18.82 |       20 | Unit Tests |
+                >> |  98.82 |      100 | TOTAL |
+
+
+
+                ### AutoCompleter.java
+
+                ```java
+                class AutoCompleter {}
+                ```
+                """;
+
+        String previous = null;
+        for (int i = 0; i < 4; i++) {
+            String canonical = (String) invokeMethod(
+                    controller,
+                    "normalizeRubricAndSummaryBlocks",
+                    new Class<?>[] {String.class, String.class},
+                    text,
+                    "pkg1"
+            );
+            String rebuilt = GradingWindowController.rebuildRubricAndSummaryText(canonical, editor);
+            text = (String) invokeMethod(
+                    controller,
+                    "normalizeForLegacyEditorView",
+                    new Class<?>[] {String.class},
+                    rebuilt
+            );
+            if (previous != null && i >= 2) {
+                assertEquals(previous, text);
+            }
+            previous = text;
+        }
+    }
+
+    @Test
+    public void loadInitialMarkdownForStudent_usesRepoReportAndEnsuresPatchSections(@TempDir Path tmp)
+            throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+        Path repoDir = tmp.resolve("repo-existing");
+        Files.createDirectories(repoDir);
+        Path mappingFile = tmp.resolve("mappings.json");
+        writeMappingFile(mappingFile, Map.of("pkg1", repoDir.toString()));
+
+        setField(controller, "assignmentId", "A1");
+        setField(controller, "mappingsPath", mappingFile);
+        setField(controller, "rootPath", tmp);
+        setField(controller, "assignment", buildSingleRubricAssignment());
+        setField(controller, "assignmentsFile", buildSingleRubricAssignmentsFile());
+        setField(
+                controller,
+                "gradingReportEditorService",
+                new GradingReportEditorService(
+                        buildSingleRubricAssignment(),
+                        buildSingleRubricAssignmentsFile()
+                )
+        );
+
+        GradingDraftService draftService = new GradingDraftService(new ReportHtmlWrapper());
+        draftService.saveReportMarkdown("A1", "pkg1", repoDir, "# Existing\n\n> # Feedback\n> * hi");
+
+        String loaded = (String) invokeMethod(
+                controller,
+                "loadInitialMarkdownForStudent",
+                new Class<?>[] {String.class},
+                "pkg1"
+        );
+
+        assertTrue(loaded.contains("# Existing"));
+        assertTrue(loaded.contains("<!-- RUBRIC_TABLE_BEGIN -->"));
+        assertTrue(loaded.contains("<!-- COMMENTS_SUMMARY_BEGIN -->"));
+    }
+
+    @Test
+    public void loadInitialMarkdownForStudent_fallsBackToFreshSkeletonWhenReportMissing(
+            @TempDir Path tmp
+    ) throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+        Path repoDir = tmp.resolve("repo-empty");
+        Files.createDirectories(repoDir);
+        Path mappingFile = tmp.resolve("mappings.json");
+        writeMappingFile(mappingFile, Map.of("pkg1", repoDir.toString()));
+
+        setField(controller, "assignmentId", "A1");
+        setField(controller, "mappingsPath", mappingFile);
+        setField(controller, "rootPath", tmp);
+        setField(controller, "assignment", buildSingleRubricAssignment());
+        setField(controller, "assignmentsFile", buildSingleRubricAssignmentsFile());
+        setField(
+                controller,
+                "gradingReportEditorService",
+                new GradingReportEditorService(
+                        buildSingleRubricAssignment(),
+                        buildSingleRubricAssignmentsFile()
+                )
+        );
+
+        String loaded = (String) invokeMethod(
+                controller,
+                "loadInitialMarkdownForStudent",
+                new Class<?>[] {String.class},
+                "pkg1"
+        );
+
+        assertTrue(loaded.contains("_No report found for pkg1._"));
+        assertTrue(loaded.contains("<!-- RUBRIC_TABLE_BEGIN -->"));
+        assertTrue(loaded.contains("<!-- COMMENTS_SUMMARY_BEGIN -->"));
+    }
+
+    @Test
+    public void previewHelpers_buildExpectedTitleAndFileName() {
+        assertEquals("A1pkg1", GradingWindowController.previewTitle("A1", "pkg1"));
+        assertEquals("pkg1", GradingWindowController.previewTitle(null, "pkg1"));
+        assertEquals("A1", GradingWindowController.previewTitle("A1", null));
+        assertEquals("A1pkg1_preview.html", GradingWindowController.previewFileName("A1pkg1"));
+    }
+
+    @Test
+    public void loadComments_invalidJson_fallsBackToEmptyLibrary(@TempDir Path tmp)
+            throws Exception {
+        String originalHome = System.getProperty("user.home");
+        try {
+            System.setProperty("user.home", tmp.toString());
+            Path commentsPath = tmp.resolve("Library")
+                    .resolve("Application Support")
+                    .resolve("GHCU2")
+                    .resolve("comments.json");
+            Files.createDirectories(commentsPath.getParent());
+            Files.writeString(commentsPath, "{invalid");
+
+            GradingWindowController controller = new GradingWindowController();
+            invokeMethod(controller, "loadComments");
+
+            Field libraryField = controller.getClass().getDeclaredField("commentLibrary");
+            libraryField.setAccessible(true);
+            Object library = libraryField.get(controller);
+            Method getComments = library.getClass().getDeclaredMethod("getComments");
+            @SuppressWarnings("unchecked")
+            List<Object> comments = (List<Object>) getComments.invoke(library);
+            assertEquals(0, comments.size());
+        } finally {
+            if (originalHome != null) {
+                System.setProperty("user.home", originalHome);
+            }
+        }
+    }
+
+    @Test
+    public void loadComments_validJson_loadsCommentLibrary(@TempDir Path tmp)
+            throws Exception {
+        String originalHome = System.getProperty("user.home");
+        try {
+            System.setProperty("user.home", tmp.toString());
+            Path commentsPath = tmp.resolve("Library")
+                    .resolve("Application Support")
+                    .resolve("GHCU2")
+                    .resolve("comments.json");
+            Files.createDirectories(commentsPath.getParent());
+            Files.writeString(
+                    commentsPath,
+                    """
+                    {
+                      "schemaVersion": 1,
+                      "comments": [
+                        {
+                          "commentId": "c1",
+                          "assignmentKey": "A1",
+                          "rubricItemId": "ri_impl",
+                          "title": "T",
+                          "bodyMarkdown": "B",
+                          "pointsDeducted": 1
+                        }
+                      ]
+                    }
+                    """
+            );
+
+            GradingWindowController controller = new GradingWindowController();
+            invokeMethod(controller, "loadComments");
+
+            Field libraryField = controller.getClass().getDeclaredField("commentLibrary");
+            libraryField.setAccessible(true);
+            Object library = libraryField.get(controller);
+            Method getComments = library.getClass().getDeclaredMethod("getComments");
+            @SuppressWarnings("unchecked")
+            List<Object> comments = (List<Object>) getComments.invoke(library);
+            assertEquals(1, comments.size());
+        } finally {
+            if (originalHome != null) {
+                System.setProperty("user.home", originalHome);
+            }
+        }
+    }
+
+    @Test
+    public void computePointsLostInTextForRubric_sumsValidAndIgnoresMalformedLines() {
+        String text = """
+                > * -2 points (ri_impl)
+                > * -3 points (ri_impl)
+                > * -x points (ri_impl)
+                > * -1 points (ri_other)
+                plain line
+                """;
+
+        int lost = GradingWindowController.computePointsLostInTextForRubric(text, "ri_impl");
+        assertEquals(5, lost);
+    }
+
+    @Test
+    public void getMaxPointsForRubricItem_returnsAssignmentRubricPoints() throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+        setField(controller, "assignment", buildSingleRubricAssignment());
+
+        int max = (int) invokeMethod(
+                controller,
+                "getMaxPointsForRubricItem",
+                new Class<?>[] {String.class},
+                "ri_impl"
+        );
+        int missing = (int) invokeMethod(
+                controller,
+                "getMaxPointsForRubricItem",
+                new Class<?>[] {String.class},
+                "ri_missing"
+        );
+
+        assertEquals(10, max);
+        assertEquals(0, missing);
+    }
+
+    @Test
+    public void handleSaveDraftResult_clearsInProgressFlag() throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+        setField(controller, "saveInProgress", true);
+        Object result = newSaveDraftResult(false, "failed");
+
+        invokeMethod(
+                controller,
+                "handleSaveDraftResult",
+                new Class<?>[] {result.getClass(), Runnable.class},
+                result,
+                null
+        );
+
+        Field saveInProgressField = controller.getClass().getDeclaredField("saveInProgress");
+        saveInProgressField.setAccessible(true);
+        assertFalse((boolean) saveInProgressField.get(controller));
+    }
+
     private Path createRepoWithCommit(Path repoDir) throws Exception {
         Files.createDirectories(repoDir);
         runGit(repoDir, "init");
@@ -408,6 +892,32 @@ public class GradingWindowControllerTest {
         command.add("git");
         command.addAll(List.of(args));
         return command;
+    }
+
+    private Assignment buildSingleRubricAssignment() {
+        Assignment assignment = new Assignment();
+        assignment.setCourseCode("CSC");
+        assignment.setAssignmentCode("A1");
+        assignment.setAssignmentName("Assignment");
+
+        RubricItemRef ref = new RubricItemRef();
+        ref.setRubricItemId("ri_impl");
+        ref.setPoints(10);
+        Assignment.Rubric rubric = new Assignment.Rubric();
+        rubric.setItems(List.of(ref));
+        assignment.setRubric(rubric);
+        return assignment;
+    }
+
+    private AssignmentsFile buildSingleRubricAssignmentsFile() {
+        RubricItemDef def = new RubricItemDef();
+        def.setId("ri_impl");
+        def.setName("Implementation");
+        AssignmentsFile file = new AssignmentsFile();
+        HashMap<String, RubricItemDef> library = new HashMap<>();
+        library.put("ri_impl", def);
+        file.setRubricItemLibrary(library);
+        return file;
     }
 
     private void setField(Object target,

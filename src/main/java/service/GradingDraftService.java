@@ -7,8 +7,10 @@ package service;
 import model.Comments;
 
 import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -21,13 +23,24 @@ public class GradingDraftService {
     private static final String HTML_EXTENSION = ".html";
     private static final String COMMENTS_SUMMARY_BEGIN = "<!-- COMMENTS_SUMMARY_BEGIN -->";
     private static final String COMMENTS_SUMMARY_END = "<!-- COMMENTS_SUMMARY_END -->";
+    private static final String RUBRIC_TABLE_BEGIN = "<!-- RUBRIC_TABLE_BEGIN -->";
+    private static final String RUBRIC_TABLE_END = "<!-- RUBRIC_TABLE_END -->";
     private static final String FEEDBACK_HEADER = "> # Feedback";
     private static final String DEFAULT_FEEDBACK_MARKDOWN = "> * No feedback provided";
 
     private final ReportHtmlWrapper htmlWrapper;
+    private final ReportFileWriter reportFileWriter;
 
     public GradingDraftService(ReportHtmlWrapper htmlWrapper) {
+        this(htmlWrapper, null);
+    }
+
+    GradingDraftService(ReportHtmlWrapper htmlWrapper,
+                        ReportFileWriter reportFileWriter) {
         this.htmlWrapper = Objects.requireNonNull(htmlWrapper);
+        this.reportFileWriter = reportFileWriter == null
+                ? this::writeReportFileAtomically
+                : reportFileWriter;
     }
 
     public Map<String, Integer> loadManualDeductionsFromGradingDraft(String assignmentId,
@@ -93,11 +106,94 @@ public class GradingDraftService {
         Objects.requireNonNull(markdown);
 
         Path reportPath = buildReportPath(assignmentId, studentPackage, rootPath);
-        String title = assignmentId + studentPackage;
-        String html = htmlWrapper.wrapMarkdownAsHtml(title, markdown);
+        String title = studentPackage == null ? "" : studentPackage;
+        String exportedMarkdown = normalizeForSavedReport(markdown);
+        String html = htmlWrapper.wrapMarkdownAsHtml(title, exportedMarkdown);
 
-        Files.deleteIfExists(reportPath);
-        Files.writeString(reportPath, html);
+        reportFileWriter.write(reportPath, html);
+    }
+
+    private String normalizeForSavedReport(String markdown) {
+        String out = markdown == null ? "" : markdown;
+        out = replaceRubricPatchBlockWithRawTable(out);
+        out = GradingMarkdownSections.removeAllBlocks(
+                out,
+                COMMENTS_SUMMARY_BEGIN,
+                COMMENTS_SUMMARY_END
+        );
+        out = removeTotalRowFromRubricTable(out);
+        return out;
+    }
+
+    private String replaceRubricPatchBlockWithRawTable(String text) {
+        String rubric = GradingMarkdownSections.extractBlockContentsOrNull(
+                text,
+                RUBRIC_TABLE_BEGIN,
+                RUBRIC_TABLE_END
+        );
+        if (rubric == null || rubric.isBlank()) {
+            return text;
+        }
+
+        int beginIndex = text.indexOf(RUBRIC_TABLE_BEGIN);
+        if (beginIndex < 0) {
+            return text;
+        }
+        int endIndex = text.indexOf(RUBRIC_TABLE_END, beginIndex + RUBRIC_TABLE_BEGIN.length());
+        if (endIndex < 0) {
+            return text;
+        }
+        int afterEnd = endIndex + RUBRIC_TABLE_END.length();
+        return text.substring(0, beginIndex)
+                + rubric.trim()
+                + text.substring(afterEnd);
+    }
+
+    private String removeTotalRowFromRubricTable(String text) {
+        if (text == null || text.isBlank()) {
+            return text;
+        }
+        String[] lines = text.split("\\R", -1);
+        StringBuilder sb = new StringBuilder();
+        for (String line : lines) {
+            String trimmed = line == null ? "" : line.trim();
+            if (trimmed.startsWith(">>") && trimmed.contains("| TOTAL |")) {
+                continue;
+            }
+            sb.append(line).append(System.lineSeparator());
+        }
+        return sb.toString().replaceFirst("(?s)\\R\\z", "");
+    }
+
+    private void writeReportFileAtomically(Path reportPath,
+                                           String html) throws IOException {
+        Path parent = reportPath.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+
+        String prefix = reportPath.getFileName().toString();
+        Path tempFile = Files.createTempFile(parent, prefix, ".tmp");
+        boolean moved = false;
+
+        try {
+            Files.writeString(tempFile, html);
+            try {
+                Files.move(
+                        tempFile,
+                        reportPath,
+                        StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING
+                );
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(tempFile, reportPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+            moved = true;
+        } finally {
+            if (!moved) {
+                Files.deleteIfExists(tempFile);
+            }
+        }
     }
 
     private Path buildReportPath(String assignmentId,
@@ -269,5 +365,10 @@ public class GradingDraftService {
             }
         }
         return out.toString();
+    }
+
+    @FunctionalInterface
+    interface ReportFileWriter {
+        void write(Path reportPath, String html) throws IOException;
     }
 }

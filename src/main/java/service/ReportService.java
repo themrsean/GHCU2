@@ -46,7 +46,7 @@ public class ReportService {
             return new ReportGenerationResult(false, false);
         }
 
-        final String assignmentId = assignment.getCourseCode() + assignment.getAssignmentCode();
+        final String reportFilePrefix = assignment.getAssignmentCode();
         final String packagesFolderName = "packages";
         final String reportExtension = ".html";
 
@@ -108,11 +108,16 @@ public class ReportService {
                 continue;
             }
 
-            String reportFileName = assignmentId + pkg + reportExtension;
+            String reportFileName = reportFilePrefix + pkg + reportExtension;
             Path reportPath = repoRoot.resolve(reportFileName);
 
             try {
-                String markdown = buildReportMarkdown(assignment, pkg, repoRoot);
+                String markdown = buildReportMarkdown(
+                        assignment,
+                        pkg,
+                        repoRoot,
+                        reportFilePrefix
+                );
                 String html = deps.wrapMarkdownAsHtml(pkg, markdown);
 
                 Files.deleteIfExists(reportPath);
@@ -134,11 +139,10 @@ public class ReportService {
 
     private String buildReportMarkdown(Assignment assignment,
                                        String studentPackage,
-                                       Path repoPath) {
+                                       Path repoPath,
+                                       String reportFilePrefix) {
 
         final String newline = System.lineSeparator();
-        final String assignmentId = assignment.getCourseCode() + assignment.getAssignmentCode();
-
         CheckstyleService.CheckstyleResult cs = deps.buildCheckstyleResult(repoPath);
 
         UnitTestService.UnitTestResult ut =
@@ -146,14 +150,14 @@ public class ReportService {
 
         Map<String, Integer> manualDeductions =
                 deps.loadManualDeductionsFromGradingDraft(
-                        assignmentId,
+                        reportFilePrefix,
                         studentPackage,
                         repoPath
                 );
 
         String feedbackMarkdown =
                 deps.loadFeedbackSectionMarkdown(
-                        assignmentId,
+                        reportFilePrefix,
                         studentPackage,
                         repoPath
                 );
@@ -171,6 +175,7 @@ public class ReportService {
                         ut.totalTests(),
                         manualDeductions
                 );
+        rubricTableMarkdown = removeTotalRowFromRubricTable(rubricTableMarkdown);
 
         return
                 "# " + assignment.getAssignmentName() + newline + newline +
@@ -183,9 +188,35 @@ public class ReportService {
                         "## Checkstyle Violations" + newline + newline +
                         cs.markdown() + newline + newline +
                         "## Failed Unit Tests" + newline + newline +
-                        ut.markdown() + newline + newline +
+                        wrapInCodeFence(ut.markdown()) + newline + newline +
                         "## Commit History (Last 10)" + newline + newline +
                         deps.buildCommitHistoryMarkdown(repoPath) + newline;
+    }
+
+    private String wrapInCodeFence(String text) {
+        String content = text == null ? "" : text;
+        String trimmed = content.trim();
+        if (trimmed.startsWith("```") && trimmed.endsWith("```")) {
+            return content;
+        }
+        final String newline = System.lineSeparator();
+        return "```" + newline + content + newline + "```";
+    }
+
+    private String removeTotalRowFromRubricTable(String markdown) {
+        if (markdown == null || markdown.isBlank()) {
+            return markdown;
+        }
+        String[] lines = markdown.split("\\R", -1);
+        StringBuilder out = new StringBuilder();
+        for (String line : lines) {
+            String trimmed = line == null ? "" : line.trim();
+            if (trimmed.startsWith(">>") && trimmed.contains("| TOTAL |")) {
+                continue;
+            }
+            out.append(line).append(System.lineSeparator());
+        }
+        return out.toString().replaceFirst("(?s)\\R\\z", "");
     }
 
     public record ReportGenerationResult(boolean wroteAny, boolean hadFailures) {

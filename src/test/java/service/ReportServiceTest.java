@@ -110,11 +110,125 @@ public class ReportServiceTest {
         assertTrue(result.isSuccess(), "isSuccess should be true when wroteAny && !hadFailures");
 
         // Verify the report file was created in the student repo root and contains our title
-        String expectedFileName = a.getCourseCode() + a.getAssignmentCode() + "username1" + ".html";
+        String expectedFileName = a.getAssignmentCode() + "username1" + ".html";
         Path reportPath = studentRepo.resolve(expectedFileName);
         assertTrue(Files.exists(reportPath), "Report file should exist: " + reportPath);
         String content = Files.readString(reportPath);
         assertTrue(content.contains("username1"), "Report content should contain wrapped title");
+    }
+
+    @Test
+    public void generateReports_topPreamble_usesLegacyRubricThenFeedbackShape() throws Exception {
+        AssignmentsFile af = new AssignmentsFile();
+        af.setRubricItemLibrary(new HashMap<>());
+
+        Assignment a = new Assignment();
+        a.setCourseCode("CSC1120");
+        a.setAssignmentCode("L1");
+        a.setAssignmentName("Lab Assignment 1 - Image Displayer 3000");
+        Assignment.Rubric rubric = new Assignment.Rubric();
+        model.RubricItemRef commits = new model.RubricItemRef();
+        commits.setRubricItemId("ri_commits");
+        commits.setPoints(10);
+        model.RubricItemRef impl = new model.RubricItemRef();
+        impl.setRubricItemId("ri_impl");
+        impl.setPoints(60);
+        rubric.setItems(java.util.List.of(commits, impl));
+        a.setRubric(rubric);
+
+        model.RubricItemDef commitsDef = new model.RubricItemDef();
+        commitsDef.setName("Intermediate Commits");
+        model.RubricItemDef implDef = new model.RubricItemDef();
+        implDef.setName("Coding Implementation and Structure");
+        af.getRubricItemLibrary().put("ri_commits", commitsDef);
+        af.getRubricItemLibrary().put("ri_impl", implDef);
+
+        Path root = Files.createTempDirectory("rs-root-top-shape");
+        Files.createDirectories(root.resolve("packages"));
+        Path mappingsPath = Files.createTempFile("mapping-top-shape", ".json");
+        Path studentRepo = Files.createTempDirectory("student-repo-top-shape");
+
+        Map<String, RepoMapping> mapping = new HashMap<>();
+        RepoMapping rm = new RepoMapping();
+        rm.setRepoPath(studentRepo.toString());
+        mapping.put("ahlere", rm);
+
+        ReportService.ReportDependencies deps = new ReportService.ReportDependencies() {
+            @Override
+            public void log(String msg) { }
+
+            @Override
+            public Map<String, RepoMapping> loadMapping(Path ignored) {
+                return mapping;
+            }
+
+            @Override
+            public Path resolveRepoRoot(Path mappedRepoPath) {
+                return mappedRepoPath;
+            }
+
+            @Override
+            public CheckstyleService.CheckstyleResult buildCheckstyleResult(Path repoPath) {
+                return new CheckstyleService.CheckstyleResult("_No checkstyle violations._", 0);
+            }
+
+            @Override
+            public UnitTestService.UnitTestResult buildUnitTestResultMarkdown(
+                    String studentPackage,
+                    Path repoPath
+            ) {
+                return new UnitTestService.UnitTestResult("_No failed unit tests._", 0, 0);
+            }
+
+            @Override
+            public Map<String, Integer> loadManualDeductionsFromGradingDraft(
+                    String assignmentId,
+                    String studentPackage,
+                    Path rootPath
+            ) {
+                return Map.of();
+            }
+
+            @Override
+            public String loadFeedbackSectionMarkdown(String assignmentId,
+                                                     String studentPackage,
+                                                     Path rootPath) {
+                return "> * Nice work!";
+            }
+
+            @Override
+            public String buildSourceCodeMarkdown(Assignment assignment,
+                                                  String studentPackage,
+                                                  Path repoPath) {
+                return "### Image.java";
+            }
+
+            @Override
+            public String buildCommitHistoryMarkdown(Path repoPath) {
+                return "- commit history";
+            }
+
+            @Override
+            public String wrapMarkdownAsHtml(String title, String markdown) {
+                return new ReportHtmlWrapper().wrapMarkdownAsHtml(title, markdown);
+            }
+        };
+
+        ReportService svc = new ReportService(af, deps);
+        ReportService.ReportGenerationResult result = svc.generateReports(a, root, mappingsPath);
+        assertTrue(result.isSuccess());
+
+        Path reportPath = studentRepo.resolve("L1ahlere.html");
+        String markdown = new ReportHtmlWrapper().extractMarkdown(Files.readString(reportPath));
+
+        assertTrue(markdown.startsWith("# Lab Assignment 1 - Image Displayer 3000"));
+        assertTrue(markdown.contains(">> | Earned | Possible | Criteria"));
+        assertTrue(markdown.contains("> # Feedback"));
+        assertTrue(markdown.contains("> * Nice work!"));
+        assertTrue(markdown.matches(
+                "(?s).*## Failed Unit Tests\\R\\R```\\R_No failed unit tests\\._\\R```\\R\\R.*"
+        ));
+        assertFalse(markdown.contains("| TOTAL |"));
     }
 
     /**

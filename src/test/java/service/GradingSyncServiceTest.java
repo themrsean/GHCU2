@@ -159,6 +159,80 @@ public class GradingSyncServiceTest {
         );
     }
 
+    @Test
+    public void pushAllRepos_nonFastForwardPush_reportsFailedWithPushFailureDetail(
+            @TempDir Path tmp
+    ) throws Exception {
+        GradingSyncService service = new GradingSyncService();
+        Path remoteDir = tmp.resolve("remote-nff.git");
+        Path localRepo = createRepoWithUpstream(tmp.resolve("repo-local"), remoteDir);
+        Path divergingClone = tmp.resolve("repo-diverge");
+        cloneRepo(remoteDir, divergingClone);
+
+        // Advance remote history from another clone so local push becomes non-fast-forward.
+        Files.writeString(divergingClone.resolve("ADVANCE.txt"), "remote advanced");
+        runGit(divergingClone, "add", "ADVANCE.txt");
+        runGit(divergingClone, "commit", "-m", "advance remote");
+        runGit(divergingClone, "push");
+
+        Files.writeString(localRepo.resolve("A1pkg1.html"), "feedback");
+        Map<String, Path> repos = Map.of("pkg1", localRepo);
+
+        GradingSyncService.PushResult result = service.pushAllRepos(
+                List.of("pkg1"),
+                repos::get,
+                "A1"
+        );
+
+        assertEquals(0, result.pushed());
+        assertEquals(0, result.skipped());
+        assertEquals(1, result.failed());
+        assertTrue(result.detailSummary().startsWith("pkg1: git push failed:"));
+    }
+
+    @Test
+    public void pushAllRepos_fourFailures_truncatesDetailSummaryToFirstThree(@TempDir Path tmp)
+            throws Exception {
+        GradingSyncService service = new GradingSyncService();
+        Path repoNotGitA = tmp.resolve("repo-not-git-a");
+        Path repoNotGitB = tmp.resolve("repo-not-git-b");
+        Path repoNotGitC = tmp.resolve("repo-not-git-c");
+        Path repoNotGitD = tmp.resolve("repo-not-git-d");
+
+        Files.createDirectories(repoNotGitA);
+        Files.createDirectories(repoNotGitB);
+        Files.createDirectories(repoNotGitC);
+        Files.createDirectories(repoNotGitD);
+
+        Files.writeString(repoNotGitA.resolve("A1pkg1.html"), "feedback");
+        Files.writeString(repoNotGitB.resolve("A1pkg2.html"), "feedback");
+        Files.writeString(repoNotGitC.resolve("A1pkg3.html"), "feedback");
+        Files.writeString(repoNotGitD.resolve("A1pkg4.html"), "feedback");
+
+        Map<String, Path> repos = Map.of(
+                "pkg1", repoNotGitA,
+                "pkg2", repoNotGitB,
+                "pkg3", repoNotGitC,
+                "pkg4", repoNotGitD
+        );
+
+        GradingSyncService.PushResult result = service.pushAllRepos(
+                List.of("pkg1", "pkg2", "pkg3", "pkg4"),
+                repos::get,
+                "A1"
+        );
+
+        assertEquals(0, result.pushed());
+        assertEquals(4, result.skipped());
+        assertEquals(0, result.failed());
+        assertEquals(
+                "pkg1: unable to determine current branch; "
+                        + "pkg2: unable to determine current branch; "
+                        + "pkg3: unable to determine current branch",
+                result.detailSummary()
+        );
+    }
+
     private Path createRepoWithCommit(Path repoDir) throws Exception {
         Files.createDirectories(repoDir);
         runGit(repoDir, "init");
@@ -183,6 +257,36 @@ public class GradingSyncServiceTest {
         runGit(repoDir, "push", "-u", "origin", "main");
 
         return repoDir;
+    }
+
+    private Path createRepoWithUpstream(Path repoDir,
+                                        Path remoteDir) throws Exception {
+        Files.createDirectories(remoteDir);
+        runGit(remoteDir, "init", "--bare");
+
+        createRepoWithCommit(repoDir);
+        runGit(repoDir, "remote", "add", "origin", remoteDir.toString());
+        runGit(repoDir, "push", "-u", "origin", "main");
+
+        return repoDir;
+    }
+
+    private void cloneRepo(Path remoteDir,
+                           Path cloneDir) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder(
+                "git",
+                "clone",
+                remoteDir.toString(),
+                cloneDir.toString()
+        );
+        pb.redirectErrorStream(true);
+        Process process = pb.start();
+        String output = new String(process.getInputStream().readAllBytes());
+        int exitCode = process.waitFor();
+        assertEquals(0, exitCode, output);
+
+        runGit(cloneDir, "config", "user.email", "test@example.com");
+        runGit(cloneDir, "config", "user.name", "Test User");
     }
 
     private void runGit(Path workingDir,
