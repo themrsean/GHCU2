@@ -11,9 +11,12 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 public class GradingSyncService {
+
+    private static final long GIT_COMMAND_TIMEOUT_SECONDS = 30L;
 
     public interface DraftAccess {
 
@@ -35,6 +38,26 @@ public class GradingSyncService {
                                       Function<String, Path> repoDirFinder,
                                       GradingDraftService gradingDraftService,
                                       String assignmentId) {
+        return saveDrafts(
+                studentPackages,
+                draftAccess,
+                currentStudent,
+                initialMarkdownLoader,
+                repoDirFinder,
+                gradingDraftService,
+                assignmentId,
+                null
+        );
+    }
+
+    public SaveDraftResult saveDrafts(List<String> studentPackages,
+                                      DraftAccess draftAccess,
+                                      String currentStudent,
+                                      Function<String, String> initialMarkdownLoader,
+                                      Function<String, Path> repoDirFinder,
+                                      GradingDraftService gradingDraftService,
+                                      String assignmentId,
+                                      Path feedbackRoot) {
         boolean success = true;
         int wrote = 0;
         String message = "";
@@ -66,7 +89,8 @@ public class GradingSyncService {
                             assignmentId,
                             pkg,
                             repoDir,
-                            markdownToSave
+                            markdownToSave,
+                            feedbackRoot
                     );
 
                     wrote++;
@@ -121,7 +145,16 @@ public class GradingSyncService {
                     continue;
                 }
 
-                GitCommandResult add = runGit(repoDir, "add", outHtml.getFileName().toString());
+                GitCommandResult pull = runGit(repoDir, "pull");
+
+                if (pull.exitCode() != 0) {
+                    failed++;
+                    details.add(pkg + ": git pull failed: "
+                            + summarizeGitOutput(pull.output()));
+                    continue;
+                }
+
+                GitCommandResult add = runGit(repoDir, "add", "--", "*.html");
 
                 if (add.exitCode() != 0) {
                     failed++;
@@ -179,24 +212,6 @@ public class GradingSyncService {
 
         if (upstream.exitCode() != 0) {
             return new PreflightResult(false, "branch has no upstream");
-        }
-
-        GitCommandResult statusResult = runGit(repoDir, "status", "--porcelain", "-z");
-
-        if (statusResult.exitCode() != 0) {
-            return new PreflightResult(false, "unable to read repository status");
-        }
-
-        String allowedPath = reportFileName;
-        List<String> statusPaths = parsePorcelainStatusPaths(statusResult.output());
-
-        for (String pathText : statusPaths) {
-            if (!allowedPath.equals(pathText)) {
-                return new PreflightResult(
-                        false,
-                        "repository has unrelated changes: " + pathText
-                );
-            }
         }
 
         return new PreflightResult(true, "");
@@ -287,13 +302,24 @@ public class GradingSyncService {
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.directory(repoDir.toFile());
         pb.redirectErrorStream(true);
+        pb.environment().put("GIT_TERMINAL_PROMPT", "0");
+        pb.environment().put("GCM_INTERACTIVE", "never");
 
         Process p = pb.start();
+        boolean finished = p.waitFor(GIT_COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        if (!finished) {
+            p.destroyForcibly();
+            return new GitCommandResult(
+                    124,
+                    "git command timed out after " + GIT_COMMAND_TIMEOUT_SECONDS + " seconds"
+            );
+        }
+
         String output;
         try (var in = p.getInputStream()) {
             output = new String(in.readAllBytes(), StandardCharsets.UTF_8);
         }
-        int exitCode = p.waitFor();
+        int exitCode = p.exitValue();
         return new GitCommandResult(exitCode, output);
     }
 

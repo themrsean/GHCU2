@@ -458,6 +458,10 @@ class GradingWindowControllerFxIntegrationTest {
                 "Saved 1 HTML report(s) to student repositories."
         );
         assertTrue(Files.exists(repoDir.resolve("A1pkg1.html")));
+        Path feedbackCopy = tmp.resolve("root")
+                .resolve("feedback")
+                .resolve("A1pkg1.html");
+        assertTrue(Files.exists(feedbackCopy));
     }
 
     @Test
@@ -591,7 +595,38 @@ class GradingWindowControllerFxIntegrationTest {
                 "(?s).*(?:>>\\s*)?\\|\\s*8(?:\\.0+)?\\s*\\|\\s*10(?:\\.0+)?\\s*\\|\\s*Implementation\\b.*"
         ));
         assertTrue(anchorIndex >= 0);
-        assertTrue(caretAfter > anchorIndex);
+        int openingFence = text.indexOf("```", anchorIndex);
+        int closingFence = openingFence >= 0 ? text.indexOf("```", openingFence + 3) : -1;
+        assertTrue(closingFence >= 0);
+        assertTrue(caretAfter > closingFence);
+    }
+
+    @Test
+    void studentSwitch_preservesSelectionAcrossReports(@TempDir Path tmp)
+            throws Exception {
+        Path repoA = tmp.resolve("repo-a-selection");
+        Path repoB = tmp.resolve("repo-b-selection");
+        Files.createDirectories(repoA);
+        Files.createDirectories(repoB);
+        Path mappingsPath = tmp.resolve("mappings.json");
+        writeMappingFile(mappingsPath, Map.of("pkgA", repoA.toString(), "pkgB", repoB.toString()));
+
+        FxFixture fixture = loadFixture(tmp, mappingsPath);
+        waitUntilTrue(() -> "pkgA".equals(readCurrentStudent(fixture.controller)));
+
+        runOnFxAndWait(() -> {
+            fixture.reportEditor.replaceText("ABCDE");
+            fixture.reportEditor.selectRange(1, 4);
+            setDraftState(fixture.controller, "pkgB", "beta-draft", 2, true);
+            fixture.studentList.getSelectionModel().select("pkgB");
+        });
+
+        waitUntilTrue(() -> "pkgB".equals(readCurrentStudent(fixture.controller)));
+        runOnFxAndWait(() -> fixture.studentList.getSelectionModel().select("pkgA"));
+        waitUntilTrue(() -> "pkgA".equals(readCurrentStudent(fixture.controller)));
+
+        String selected = runOnFxAndWaitResult(() -> fixture.reportEditor.getSelectedText());
+        assertEquals("BCD", selected);
     }
 
     @Test

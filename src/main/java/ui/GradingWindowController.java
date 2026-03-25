@@ -21,6 +21,7 @@ import javafx.scene.control.ToolBar;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyCodeCombination;
 import javafx.scene.input.KeyCombination;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.web.WebEngine;
 import javafx.scene.web.WebView;
@@ -44,6 +45,7 @@ import service.GradingMappingsService;
 import service.GradingReportEditorService;
 import service.GradingSyncService;
 import service.ReportHtmlWrapper;
+import util.AppDataUtil;
 
 import java.io.IOException;
 import java.awt.Desktop;
@@ -54,9 +56,11 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
@@ -127,10 +131,12 @@ public class GradingWindowController {
     private Label statusLabel;
     @FXML
     private Button saveAndExportButton;
+    @FXML
+    private Button pushReportsButton;
 
     private final CommentsStore commentsStore = new CommentsStore();
     private CommentsLibrary commentLibrary;
-    private final Path commentsPath = appDataDir().resolve("comments.json");
+    private final Path commentsPath = appDataDir().resolve("comments").resolve("comments.json");
     private final ReportHtmlWrapper reportHtmlWrapper = new ReportHtmlWrapper();
     private final GradingDraftService gradingDraftService =
             new GradingDraftService(reportHtmlWrapper);
@@ -140,6 +146,9 @@ public class GradingWindowController {
     private final GradingSyncService gradingSyncService = new GradingSyncService();
     private final GradingDraftSessionService draftSessionService =
             new GradingDraftSessionService();
+    private final Set<String> reportLoadFailureStudents = Collections.synchronizedSet(
+            new HashSet<>()
+    );
 
     private AssignmentsFile assignmentsFile;
     private Assignment assignment;
@@ -206,6 +215,15 @@ public class GradingWindowController {
                 draftSessionService.updateCaretIfPresent(currentStudent, newV);
             }
         });
+        reportEditor.selectionProperty().addListener((_, _, newV) -> {
+            if (!suppressCaretEvents && currentStudent != null && newV != null) {
+                draftSessionService.updateSelectionIfPresent(
+                        currentStudent,
+                        newV.getStart(),
+                        newV.getEnd()
+                );
+            }
+        });
         reportEditor.textProperty().addListener((_, _, newText) -> {
             if (!suppressTextListener && currentStudent != null) {
                 draftSessionService.updateMarkdownIfPresent(currentStudent, newText);
@@ -221,8 +239,15 @@ public class GradingWindowController {
     }
 
     private void loadComments() {
+        Path loadPath = commentsPath;
+        if (!Files.exists(loadPath)) {
+            Path legacyComments = legacyCommentsPath();
+            if (legacyComments != null && Files.exists(legacyComments)) {
+                loadPath = legacyComments;
+            }
+        }
         try {
-            commentLibrary = commentsStore.load(commentsPath);
+            commentLibrary = commentsStore.load(loadPath);
         } catch (IOException e) {
             commentLibrary = new Comments.CommentsLibrary();
             commentLibrary.setSchemaVersion(1);
@@ -260,15 +285,137 @@ public class GradingWindowController {
         KeyCombination redo2 = new KeyCodeCombination(KeyCode.Z,
                 KeyCombination.SHORTCUT_DOWN, KeyCombination.SHIFT_DOWN);
 
-        reportEditor.setOnKeyPressed(e -> {
+        reportEditor.addEventHandler(KeyEvent.KEY_PRESSED, e -> {
             if (undo.match(e)) {
                 reportEditor.undo();
                 e.consume();
             } else if (redo1.match(e) || redo2.match(e)) {
                 reportEditor.redo();
                 e.consume();
+            } else if (handleNavigationKey(e)) {
+                e.consume();
             }
         });
+    }
+
+    private boolean handleNavigationKey(KeyEvent event) {
+        if (event == null) {
+            return false;
+        }
+        if (currentStudent == null || reportEditor == null) {
+            return false;
+        }
+
+        String text = reportEditor.getText() == null ? "" : reportEditor.getText();
+        int caret = clampCaret(reportEditor.getCaretPosition(), text.length());
+        KeyCode code = event.getCode();
+
+        return switch (code) {
+            case HOME -> {
+                int target = event.isShortcutDown()
+                        ? 0
+                        : lineStartOffset(text, caret);
+                reportEditor.moveTo(target);
+                yield true;
+            }
+            case END -> {
+                int target = event.isShortcutDown()
+                        ? text.length()
+                        : lineEndOffset(text, caret);
+                reportEditor.moveTo(target);
+                yield true;
+            }
+            case PAGE_UP -> {
+                final int pageLineCount = 30;
+                int target = moveCaretByLines(text, caret, -pageLineCount);
+                reportEditor.moveTo(target);
+                yield true;
+            }
+            case PAGE_DOWN -> {
+                final int pageLineCount = 30;
+                int target = moveCaretByLines(text, caret, pageLineCount);
+                reportEditor.moveTo(target);
+                yield true;
+            }
+            default -> false;
+        };
+    }
+
+    private int moveCaretByLines(String text, int caret, int lineDelta) {
+        String safeText = text == null ? "" : text;
+        int safeCaret = clampCaret(caret, safeText.length());
+        int currentLineStart = lineStartOffset(safeText, safeCaret);
+        int column = safeCaret - currentLineStart;
+        int targetLineStart = currentLineStart;
+        int steps = Math.abs(lineDelta);
+        boolean movingUp = lineDelta < 0;
+
+        for (int i = 0; i < steps; i++) {
+            if (movingUp) {
+                if (targetLineStart <= 0) {
+                    break;
+                }
+                targetLineStart = previousLineStart(safeText, targetLineStart);
+            } else {
+                if (targetLineStart >= safeText.length()) {
+                    break;
+                }
+                int next = nextLineStart(safeText, targetLineStart);
+                if (next == targetLineStart) {
+                    break;
+                }
+                targetLineStart = next;
+            }
+        }
+
+        int targetLineEnd = lineEndOffset(safeText, targetLineStart);
+        int targetColumn = Math.min(column, Math.max(0, targetLineEnd - targetLineStart));
+        return targetLineStart + targetColumn;
+    }
+
+    private int previousLineStart(String text, int fromLineStart) {
+        int cursor = clampCaret(fromLineStart, text.length());
+        while (cursor > 0 && isNewlineChar(text.charAt(cursor - 1))) {
+            cursor--;
+        }
+        while (cursor > 0 && !isNewlineChar(text.charAt(cursor - 1))) {
+            cursor--;
+        }
+        return cursor;
+    }
+
+    private int nextLineStart(String text, int fromLineStart) {
+        int safeStart = clampCaret(fromLineStart, text.length());
+        int end = lineEndOffset(text, safeStart);
+        int cursor = end;
+        while (cursor < text.length() && isNewlineChar(text.charAt(cursor))) {
+            cursor++;
+        }
+        return cursor;
+    }
+
+    private int lineStartOffset(String text, int caret) {
+        int cursor = clampCaret(caret, text.length());
+        while (cursor > 0 && !isNewlineChar(text.charAt(cursor - 1))) {
+            cursor--;
+        }
+        return cursor;
+    }
+
+    private int lineEndOffset(String text, int caret) {
+        int cursor = clampCaret(caret, text.length());
+        while (cursor < text.length() && !isNewlineChar(text.charAt(cursor))) {
+            cursor++;
+        }
+        return cursor;
+    }
+
+    private int clampCaret(int caret, int length) {
+        return Math.max(0, Math.min(caret, length));
+    }
+
+    private boolean isNewlineChar(char ch) {
+        return ch == '\n' || ch == '\r';
     }
 
     private void installJavaSyntaxHighlighting() {
@@ -369,28 +516,85 @@ public class GradingWindowController {
     }
 
     private void saveCurrentEditorToDraft(String studentPackage) {
-        int caret = reportEditor.getCaretPosition();
+        int liveSelectionStart = reportEditor.getSelection().getStart();
+        int liveSelectionEnd = reportEditor.getSelection().getEnd();
+        int selectionStart = liveSelectionStart;
+        int selectionEnd = liveSelectionEnd;
+        if (liveSelectionStart == liveSelectionEnd) {
+            int savedSelectionStart = draftSessionService.getSelectionStart(studentPackage);
+            int savedSelectionEnd = draftSessionService.getSelectionEnd(studentPackage);
+            if (savedSelectionStart != savedSelectionEnd) {
+                selectionStart = savedSelectionStart;
+                selectionEnd = savedSelectionEnd;
+            }
+        }
         String text = reportEditor.getText() == null ? "" : reportEditor.getText();
-        draftSessionService.saveEditorState(studentPackage, text, caret);
+        draftSessionService.saveEditorState(
+                studentPackage,
+                text,
+                selectionStart,
+                selectionEnd
+        );
     }
 
     private void restoreCaretAfterUpdate(String studentPackage, int caretToRestore) {
-        Platform.runLater(() -> {
-            if (!Objects.equals(currentStudent, studentPackage)) {
+        restoreSelectionAfterUpdate(
+                studentPackage,
+                caretToRestore,
+                caretToRestore,
+                true
+        );
+    }
+
+    private void restoreSelectionAfterUpdate(String studentPackage,
+                                             int selectionStartToRestore,
+                                             int selectionEndToRestore,
+                                             boolean centerCaret) {
+        Runnable restoreTask = () -> {
+            if (studentPackage != null && !Objects.equals(currentStudent, studentPackage)) {
                 return;
             }
-            int caret = Math.max(0, Math.min(caretToRestore, reportEditor.getLength()));
+            int selectionStart = Math.max(
+                    0,
+                    Math.min(selectionStartToRestore, reportEditor.getLength())
+            );
+            int selectionEnd = Math.max(
+                    0,
+                    Math.min(selectionEndToRestore, reportEditor.getLength())
+            );
+            if (selectionEnd < selectionStart) {
+                int tmp = selectionStart;
+                selectionStart = selectionEnd;
+                selectionEnd = tmp;
+            }
 
             suppressCaretEvents = true;
-            reportEditor.moveTo(caret);
+            if (selectionStart == selectionEnd) {
+                reportEditor.moveTo(selectionEnd);
+            } else {
+                reportEditor.selectRange(selectionStart, selectionEnd);
+            }
 
-            // Center the caret in the viewport
-            centerCaretInViewport();
+            if (centerCaret) {
+                centerCaretInViewport();
+            }
 
             suppressCaretEvents = false;
 
-            draftSessionService.updateCaretIfPresent(studentPackage, caret);
-        });
+            if (studentPackage != null) {
+                draftSessionService.updateFromEditorIfPresent(
+                        studentPackage,
+                        reportEditor.getText(),
+                        reportEditor.getSelection().getStart(),
+                        reportEditor.getSelection().getEnd()
+                );
+            }
+        };
+        if (Platform.isFxApplicationThread()) {
+            restoreTask.run();
+        } else {
+            Platform.runLater(restoreTask);
+        }
     }
 
     private void loadDraftIntoEditor(String studentPackage) {
@@ -405,10 +609,14 @@ public class GradingWindowController {
             draftSessionService.setCaretPosition(studentPackage, 0);
         }
         int desiredCaret = draftSessionService.getCaretPosition(studentPackage);
+        int selectionStart = draftSessionService.getSelectionStart(studentPackage);
+        int selectionEnd = draftSessionService.getSelectionEnd(studentPackage);
         setEditorTextPreservingCaret(
                 currentStudent,
                 draftSessionService.getMarkdown(studentPackage),
                 desiredCaret,
+                selectionStart,
+                selectionEnd,
                 true
         );
 
@@ -430,11 +638,24 @@ public class GradingWindowController {
         Path repoDir = findRepoDirForStudentPackage(studentPackage);
 
         if (repoDir != null) {
-            String markdown = gradingDraftService.loadReportMarkdown(
+            GradingDraftService.LoadReportResult loadResult = gradingDraftService
+                    .loadReportMarkdownResult(
                     effectiveReportFilePrefix(),
                     studentPackage,
                     repoDir
             );
+            if (!loadResult.readOk()) {
+                reportLoadFailureStudents.add(studentPackage);
+                String message = loadResult.message();
+                if (message == null || message.isBlank()) {
+                    message = "unknown error";
+                }
+                status("Failed to load report for " + studentPackage + ": " + message);
+                return buildFreshReportSkeleton(studentPackage);
+            }
+
+            reportLoadFailureStudents.remove(studentPackage);
+            String markdown = loadResult.markdown();
 
             if (!markdown.isBlank()) {
                 return ensurePatchCSectionsExist(markdown, studentPackage);
@@ -596,6 +817,12 @@ public class GradingWindowController {
                                                  boolean centerCaret,
                                                  List<ParsedComment> previousComments) {
         String text = reportEditor.getText() == null ? "" : reportEditor.getText();
+        int selectionStartToRestore = currentStudent == null
+                ? reportEditor.getSelection().getStart()
+                : draftSessionService.getSelectionStart(currentStudent);
+        int selectionEndToRestore = currentStudent == null
+                ? reportEditor.getSelection().getEnd()
+                : draftSessionService.getSelectionEnd(currentStudent);
         String canonical = normalizeRubricAndSummaryBlocks(text, currentStudent);
         String updated = rebuildRubricAndSummaryText(
                 canonical,
@@ -604,10 +831,36 @@ public class GradingWindowController {
         );
         updated = normalizeForLegacyEditorViewToFixedPoint(updated);
         if (!updated.equals(text)) {
-            setEditorTextPreservingCaret(currentStudent, updated, caretToRestore, centerCaret);
+            int selectionStartForUpdated = selectionStartToRestore;
+            int selectionEndForUpdated = selectionEndToRestore;
+            if (selectionEndToRestore > selectionStartToRestore
+                    && selectionStartToRestore >= 0
+                    && selectionEndToRestore <= text.length()) {
+                String selectedText = text.substring(selectionStartToRestore, selectionEndToRestore);
+                if (!selectedText.isEmpty()) {
+                    int relocatedStart = updated.indexOf(selectedText);
+                    if (relocatedStart >= 0) {
+                        selectionStartForUpdated = relocatedStart;
+                        selectionEndForUpdated = relocatedStart + selectedText.length();
+                    }
+                }
+            }
+            setEditorTextPreservingCaret(
+                    currentStudent,
+                    updated,
+                    caretToRestore,
+                    selectionStartForUpdated,
+                    selectionEndForUpdated,
+                    centerCaret
+            );
         } else {
-            // Even if no text changed, still restore caret reliably.
-            Platform.runLater(() -> restoreCaretAfterUpdate(currentStudent, caretToRestore));
+            // Even if no text changed, still restore editor position reliably.
+            restoreSelectionAfterUpdate(
+                    currentStudent,
+                    selectionStartToRestore,
+                    selectionEndToRestore,
+                    centerCaret
+            );
         }
     }
 
@@ -749,15 +1002,7 @@ public class GradingWindowController {
 
     private void restoreCaretToInsertedAnchor(String anchorId, int fallbackCaret) {
         Platform.runLater(() -> Platform.runLater(() -> {
-            if (anchorId == null || anchorId.isBlank() || currentStudent == null) {
-                restoreCaretAfterUpdate(currentStudent, fallbackCaret);
-                return;
-            }
-            String text = reportEditor.getText() == null ? "" : reportEditor.getText();
-            String anchor = "<a id=\"" + anchorId + "\"></a>";
-            int anchorIndex = text.indexOf(anchor);
-            int targetCaret = anchorIndex >= 0 ? anchorIndex : fallbackCaret;
-            restoreCaretAfterUpdate(currentStudent, targetCaret);
+            restoreCaretAfterUpdate(currentStudent, fallbackCaret);
         }));
     }
 
@@ -889,7 +1134,7 @@ public class GradingWindowController {
 
         // fallback if missing
         if (id.isEmpty()) {
-            return COMMENT_ANCHOR_PREFIX + System.currentTimeMillis();
+            return COMMENT_ANCHOR_PREFIX + "generated";
         }
 
         // make safe for HTML id
@@ -1031,26 +1276,59 @@ public class GradingWindowController {
 
         if (currentStudent != null) {
             String markdown = reportEditor.getText() == null ? "" : reportEditor.getText();
-            draftSessionService.saveEditorState(currentStudent, markdown, caret);
+            draftSessionService.saveEditorState(
+                    currentStudent,
+                    markdown,
+                    reportEditor.getSelection().getStart(),
+                    reportEditor.getSelection().getEnd()
+            );
         }
     }
 
     private SaveDraftResult saveDraftsWorker() {
+        List<String> allStudents = new ArrayList<>(studentPackages);
+        Set<String> failedLoads;
+        synchronized (reportLoadFailureStudents) {
+            failedLoads = new HashSet<>(reportLoadFailureStudents);
+        }
+        List<String> studentsToSave = new ArrayList<>();
+        for (String studentPackage : allStudents) {
+            if (!failedLoads.contains(studentPackage)) {
+                studentsToSave.add(studentPackage);
+            }
+        }
+        int skippedForLoadFailure = allStudents.size() - studentsToSave.size();
+
         GradingSyncService.SaveDraftResult result = gradingSyncService.saveDrafts(
-                new ArrayList<>(studentPackages),
+                studentsToSave,
                 buildDraftAccess(),
                 currentStudent,
                 this::loadInitialMarkdownForStudent,
                 this::findRepoDirForStudentPackage,
                 gradingDraftService,
-                effectiveReportFilePrefix()
+                effectiveReportFilePrefix(),
+                rootPath
         );
-        return new SaveDraftResult(result.success(), result.message());
+        String message = result.message();
+        if (skippedForLoadFailure > 0) {
+            String skippedMessage = "Skipped " + skippedForLoadFailure
+                    + " report(s) due to load errors.";
+            if (message == null || message.isBlank()) {
+                message = skippedMessage;
+            } else {
+                message = message + " " + skippedMessage;
+            }
+        }
+        boolean success = result.success() && skippedForLoadFailure == 0;
+        return new SaveDraftResult(success, message);
     }
 
     private void setSaveUiDisabled(boolean disabled) {
         if (saveAndExportButton != null) {
             saveAndExportButton.setDisable(disabled);
+        }
+        if (pushReportsButton != null) {
+            pushReportsButton.setDisable(disabled);
         }
 
         if (studentList != null) {
@@ -1071,19 +1349,69 @@ public class GradingWindowController {
         return gradingMappingsService.findRepoDirForStudentPackage(
                 studentPackage,
                 mappingsPath,
-                assignmentId,
+                effectiveReportFilePrefix(),
                 rootPath,
                 appDataDir()
         );
     }
 
     private String wrapMarkdownAsHtml(String title, String markdown) {
-        return reportHtmlWrapper.wrapMarkdownAsHtml(title, markdown);
+        String safeMarkdown = sanitizePreviewMarkdown(markdown);
+        return reportHtmlWrapper.wrapMarkdownAsHtml(title, safeMarkdown);
+    }
+
+    static String sanitizePreviewMarkdown(String markdown) {
+        if (markdown == null || markdown.isEmpty()) {
+            return markdown == null ? "" : markdown;
+        }
+
+        String[] lines = markdown.split("\\R", -1);
+        StringBuilder out = new StringBuilder(markdown.length() + 64);
+        boolean inFence = false;
+
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            String trimmed = line == null ? "" : line.trim();
+            if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+                inFence = !inFence;
+                out.append(line);
+            } else if (inFence) {
+                out.append(escapePipeAndAngleBrackets(line));
+            } else {
+                out.append(line);
+            }
+
+            if (i < lines.length - 1) {
+                out.append(System.lineSeparator());
+            }
+        }
+
+        return out.toString();
+    }
+
+    private static String escapePipeAndAngleBrackets(String line) {
+        if (line == null || line.isEmpty()) {
+            return line == null ? "" : line;
+        }
+
+        String escaped = line.replace("&", "&amp;");
+        escaped = escaped.replace("<", "&lt;");
+        escaped = escaped.replace(">", "&gt;");
+        return escaped.replace("|", "&#124;");
     }
 
     @FXML
     private void onSaveAndExport() {
         beginSaveDrafts(this::beginPushAllRepos);
+    }
+
+    @FXML
+    private void onPushReports() {
+        if (saveInProgress) {
+            status("Save already in progress.");
+            return;
+        }
+        beginPushAllRepos();
     }
 
     private void beginPushAllRepos() {
@@ -1250,8 +1578,14 @@ public class GradingWindowController {
 
 
     private void status(String msg) {
-        if (statusLabel != null) {
-            statusLabel.setText(msg == null ? "" : msg);
+        if (statusLabel == null) {
+            return;
+        }
+        String safeMsg = msg == null ? "" : msg;
+        if (Platform.isFxApplicationThread()) {
+            statusLabel.setText(safeMsg);
+        } else {
+            Platform.runLater(() -> statusLabel.setText(safeMsg));
         }
     }
 
@@ -1268,22 +1602,11 @@ public class GradingWindowController {
     }
 
     private static Path appDataDir() {
-        String home = System.getProperty("user.home");
-        String os = System.getProperty("os.name").toLowerCase();
+        return AppDataUtil.appDataDir();
+    }
 
-        Path base;
-        if (os.contains("mac")) {
-            base = Path.of(home, "Library", "Application Support");
-        } else if (os.contains("win")) {
-            String appData = System.getenv("APPDATA");
-            base = (appData != null && !appData.isBlank())
-                    ? Path.of(appData)
-                    : Path.of(home, "AppData", "Roaming");
-        } else {
-            base = Path.of(home, ".local", "share");
-        }
-
-        return base.resolve("GHCU2");
+    private static Path legacyCommentsPath() {
+        return AppDataUtil.legacyGhcu2AppDataDir().resolve("comments.json");
     }
 
     private RemoveCommentPickerController.InjectedCommentRef
@@ -1326,6 +1649,22 @@ public class GradingWindowController {
                                               String newText,
                                               int caretToRestore,
                                               boolean centerCaret) {
+        setEditorTextPreservingCaret(
+                studentPackage,
+                newText,
+                caretToRestore,
+                caretToRestore,
+                caretToRestore,
+                centerCaret
+        );
+    }
+
+    private void setEditorTextPreservingCaret(String studentPackage,
+                                              String newText,
+                                              int caretToRestore,
+                                              int selectionStartToRestore,
+                                              int selectionEndToRestore,
+                                              boolean centerCaret) {
 
         String safeText = newText == null ? "" : newText;
 
@@ -1339,29 +1678,18 @@ public class GradingWindowController {
         suppressHighlighting = false;
         suppressCaretEvents = false;
 
-        Platform.runLater(() -> {
-            if (studentPackage != null && !Objects.equals(studentPackage, currentStudent)) {
-                return;
-            }
-            int caret = Math.max(0, Math.min(caretToRestore, reportEditor.getLength()));
-
-            suppressCaretEvents = true;
-            reportEditor.moveTo(caret);
-
-            if (centerCaret) {
-                centerCaretInViewport();
-            }
-
-            suppressCaretEvents = false;
-
-            if (studentPackage != null) {
-                draftSessionService.updateFromEditorIfPresent(
-                        studentPackage,
-                        reportEditor.getText(),
-                        caret
-                );
-            }
-        });
+        int resolvedSelectionStart = selectionStartToRestore;
+        int resolvedSelectionEnd = selectionEndToRestore;
+        if (resolvedSelectionStart == resolvedSelectionEnd) {
+            resolvedSelectionStart = caretToRestore;
+            resolvedSelectionEnd = caretToRestore;
+        }
+        restoreSelectionAfterUpdate(
+                studentPackage,
+                resolvedSelectionStart,
+                resolvedSelectionEnd,
+                centerCaret
+        );
     }
 
     @FXML
@@ -1384,6 +1712,7 @@ public class GradingWindowController {
 
             Path out = previewDir.resolve(previewFileName(title));
             Files.writeString(out, html, StandardCharsets.UTF_8);
+            writeLegacyPreviewCopy(title, html, out);
 
             // MUST show window on FX thread
             Platform.runLater(() -> {
@@ -1431,6 +1760,7 @@ public class GradingWindowController {
 
             try {
                 Files.writeString(htmlPath, html, StandardCharsets.UTF_8);
+                writeLegacyPreviewCopy(title, html, htmlPath);
             } catch (IOException ex) {
                 status("Preview refresh failed: " + ex.getMessage());
                 return;
@@ -1489,20 +1819,51 @@ public class GradingWindowController {
         return title + "_preview.html";
     }
 
+    private void writeLegacyPreviewCopy(String title,
+                                        String html,
+                                        Path canonicalPath) throws IOException {
+        Path legacyPreviewDir = AppDataUtil.legacyGhcu2AppDataDir().resolve("preview");
+        Files.createDirectories(legacyPreviewDir);
+        Path legacyPath = legacyPreviewDir.resolve(previewFileName(title));
+        if (!legacyPath.equals(canonicalPath)) {
+            Files.writeString(legacyPath, html, StandardCharsets.UTF_8);
+        }
+    }
+
     private String normalizeForLegacyEditorView(String markdown) {
         String out = markdown == null ? "" : markdown;
-        out = replaceRubricPatchBlockWithRawTable(out);
-        out = GradingMarkdownSections.removeAllBlocks(
-                out,
+        int preambleBoundary = findPreambleBoundary(out);
+        String preamble = out.substring(0, preambleBoundary);
+        String remainder = out.substring(preambleBoundary);
+
+        preamble = replaceRubricPatchBlockWithRawTable(preamble);
+        preamble = GradingMarkdownSections.removeAllBlocks(
+                preamble,
                 COMMENTS_SUMMARY_BEGIN,
                 COMMENTS_SUMMARY_END
         );
-        out = removeTotalRowFromRubricTable(out);
-        out = ensureRubricTableBeforeFeedback(out);
-        out = normalizeSpacingBeforeRubricTable(out);
-        out = normalizeSpacingBetweenRubricAndFeedback(out);
-        out = normalizeSpacingAfterFeedbackBlock(out);
+        preamble = removeTotalRowFromRubricTable(preamble);
+        preamble = ensureRubricTableBeforeFeedback(preamble);
+        preamble = normalizeSpacingBeforeRubricTable(preamble);
+        preamble = normalizeSpacingBetweenRubricAndFeedback(preamble);
+        preamble = normalizeSpacingAfterFeedbackBlock(preamble);
+
+        out = preamble + remainder;
         return out.replaceFirst("(?s)\\R+\\z", "");
+    }
+
+    private int findPreambleBoundary(String markdown) {
+        if (markdown == null || markdown.isEmpty()) {
+            return 0;
+        }
+        Pattern majorSectionPattern = Pattern.compile(
+                "(?m)^##\\s+(Source Code|Checkstyle Violations|Failed Unit Tests|Commit History\\b).*"
+        );
+        Matcher matcher = majorSectionPattern.matcher(markdown);
+        if (matcher.find()) {
+            return matcher.start();
+        }
+        return markdown.length();
     }
 
     private String normalizeForLegacyEditorViewToFixedPoint(String markdown) {
@@ -1724,7 +2085,7 @@ public class GradingWindowController {
     private Map<String, String> loadMappingsForUse() {
         return gradingMappingsService.loadMappingsForUse(
                 mappingsPath,
-                assignmentId,
+                effectiveReportFilePrefix(),
                 rootPath,
                 appDataDir()
         );
@@ -1733,7 +2094,7 @@ public class GradingWindowController {
     private Path resolveMappingFile() {
         return gradingMappingsService.resolveMappingFile(
                 mappingsPath,
-                assignmentId,
+                effectiveReportFilePrefix(),
                 appDataDir()
         );
     }

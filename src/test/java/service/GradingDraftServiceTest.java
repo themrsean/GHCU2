@@ -197,6 +197,83 @@ public class GradingDraftServiceTest {
     }
 
     @Test
+    public void loadFeedbackSectionMarkdown_stopsBeforeGeneratedSections(
+            @TempDir Path tmp
+    ) throws Exception {
+        GradingDraftService service =
+                new GradingDraftService(new ReportHtmlWrapper());
+
+        String markdown = String.join(
+                System.lineSeparator(),
+                "# Sample",
+                "",
+                "> # Feedback",
+                "<a id=\"cmt_1\"></a>",
+                "```",
+                "> #### Missing semicolon",
+                "> * -10 points (ri_impl)",
+                "> Fix the statement terminator.",
+                "```",
+                "",
+                "## Source Code",
+                "",
+                "### Main.java",
+                "",
+                "```java",
+                "public class Main {",
+                "}",
+                "```",
+                "",
+                "## Checkstyle Violations"
+        );
+
+        Path report = tmp.resolve("A1smith.html");
+        Files.writeString(report, new ReportHtmlWrapper().wrapMarkdownAsHtml("A1smith", markdown));
+
+        String feedback = service.loadFeedbackSectionMarkdown("A1", "smith", tmp);
+
+        assertTrue(feedback.contains("> #### Missing semicolon"));
+        assertFalse(feedback.contains("## Source Code"));
+        assertFalse(feedback.contains("### Main.java"));
+        assertFalse(feedback.contains("## Checkstyle Violations"));
+    }
+
+    @Test
+    public void loadFeedbackSectionMarkdown_stopsBeforeGeneratedSourceFileHeadings_withoutSourceSectionHeader(
+            @TempDir Path tmp
+    ) throws Exception {
+        GradingDraftService service =
+                new GradingDraftService(new ReportHtmlWrapper());
+
+        String markdown = String.join(
+                System.lineSeparator(),
+                "# Sample",
+                "",
+                "> # Feedback",
+                "> * Nice work.",
+                "",
+                "### Main.java",
+                "",
+                "```java",
+                "public class Main {",
+                "}",
+                "```",
+                "",
+                "## Checkstyle Violations"
+        );
+
+        Path report = tmp.resolve("A1smith.html");
+        Files.writeString(report, new ReportHtmlWrapper().wrapMarkdownAsHtml("A1smith", markdown));
+
+        String feedback = service.loadFeedbackSectionMarkdown("A1", "smith", tmp);
+
+        assertTrue(feedback.contains("> * Nice work."));
+        assertFalse(feedback.contains("### Main.java"));
+        assertFalse(feedback.contains("public class Main"));
+        assertFalse(feedback.contains("## Checkstyle Violations"));
+    }
+
+    @Test
     public void loadReportMarkdown_returnsEmptyForMalformedWrappedHtml(
             @TempDir Path tmp) throws Exception {
         GradingDraftService service =
@@ -238,6 +315,43 @@ public class GradingDraftServiceTest {
 
         String html = Files.readString(report);
         assertTrue(html.contains("<title>smith</title>"));
+    }
+
+    @Test
+    public void saveReportMarkdown_writesFeedbackCopyAtProjectRootWhenRepoInsidePackages(
+            @TempDir Path tmp
+    ) throws Exception {
+        ReportHtmlWrapper wrapper = new ReportHtmlWrapper();
+        GradingDraftService service = new GradingDraftService(wrapper);
+        Path projectRoot = tmp.resolve("project");
+        Path repoDir = projectRoot.resolve("packages").resolve("repo-smith");
+        Files.createDirectories(repoDir);
+
+        service.saveReportMarkdown("A1", "smith", repoDir, "# Feedback");
+
+        Path repoReport = repoDir.resolve("A1smith.html");
+        Path feedbackCopy = projectRoot.resolve("feedback").resolve("A1smith.html");
+        assertTrue(Files.exists(repoReport));
+        assertTrue(Files.exists(feedbackCopy));
+        assertEquals(Files.readString(repoReport), Files.readString(feedbackCopy));
+    }
+
+    @Test
+    public void saveReportMarkdown_writesFeedbackCopyUnderRootWhenPackagesAncestorMissing(
+            @TempDir Path tmp
+    ) throws Exception {
+        ReportHtmlWrapper wrapper = new ReportHtmlWrapper();
+        GradingDraftService service = new GradingDraftService(wrapper);
+        Path repoDir = tmp.resolve("repo-smith");
+        Files.createDirectories(repoDir);
+
+        service.saveReportMarkdown("A1", "smith", repoDir, "# Feedback");
+
+        Path repoReport = repoDir.resolve("A1smith.html");
+        Path feedbackCopy = repoDir.resolve("feedback").resolve("A1smith.html");
+        assertTrue(Files.exists(repoReport));
+        assertTrue(Files.exists(feedbackCopy));
+        assertEquals(Files.readString(repoReport), Files.readString(feedbackCopy));
     }
 
     @Test
@@ -308,5 +422,20 @@ public class GradingDraftServiceTest {
         assertEquals("simulated write failure", error.getMessage());
         assertEquals(oldHtml, Files.readString(report));
         assertEquals(oldMarkdown, service.loadReportMarkdown("A1", "smith", tmp).trim());
+    }
+
+    @Test
+    public void loadReportMarkdownResult_missingReport_returnsNoReport(
+            @TempDir Path tmp
+    ) {
+        GradingDraftService service =
+                new GradingDraftService(new ReportHtmlWrapper());
+
+        GradingDraftService.LoadReportResult result =
+                service.loadReportMarkdownResult("A1", "smith", tmp);
+
+        assertTrue(result.readOk());
+        assertFalse(result.reportExists());
+        assertEquals("", result.markdown());
     }
 }

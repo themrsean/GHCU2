@@ -15,8 +15,15 @@ public class CheckstyleServiceParsingTest {
 
     private CheckstyleService createStub() {
         ProcessRunner pr = new ProcessRunner() { };
-        ServiceLogger logger = s -> { };
-        return new CheckstyleService(pr, logger, Path.of("/does/not/exist/checkstyle.jar"));
+        ServiceLogger logger = msg -> { };
+        ToolArtifactService artifactService =
+                new ToolArtifactService(Path.of("build", "tmp", "checkstyle-test-cache"));
+        return new CheckstyleService(
+                pr,
+                logger,
+                Path.of("/does/not/exist/checkstyle.jar"),
+                artifactService
+        );
     }
 
     @Test
@@ -66,7 +73,11 @@ public class CheckstyleServiceParsingTest {
 
     @Test
     public void buildCheckstyleResult_disabled_returnsDisabledMarkdown(@TempDir Path tmp) {
-        CheckstyleService service = createService(new ProcessRunner() { }, tmp.resolve("checkstyle.jar"));
+        CheckstyleService service = createService(
+                new ProcessRunner() { },
+                tmp.resolve("checkstyle.jar"),
+                tmp
+        );
 
         CheckstyleService.CheckstyleResult result = service.buildCheckstyleResult(
                 tmp.resolve("repo"),
@@ -82,7 +93,11 @@ public class CheckstyleServiceParsingTest {
 
     @Test
     public void buildCheckstyleResult_blankUrl_returnsGuidance(@TempDir Path tmp) {
-        CheckstyleService service = createService(new ProcessRunner() { }, tmp.resolve("checkstyle.jar"));
+        CheckstyleService service = createService(
+                new ProcessRunner() { },
+                tmp.resolve("checkstyle.jar"),
+                tmp
+        );
 
         CheckstyleService.CheckstyleResult result = service.buildCheckstyleResult(
                 tmp.resolve("repo"),
@@ -98,7 +113,11 @@ public class CheckstyleServiceParsingTest {
 
     @Test
     public void buildCheckstyleResult_missingJar_returnsGuidance(@TempDir Path tmp) {
-        CheckstyleService service = createService(new ProcessRunner() { }, tmp.resolve("missing.jar"));
+        CheckstyleService service = createService(
+                new ProcessRunner() { },
+                tmp.resolve("missing.jar"),
+                tmp
+        );
 
         CheckstyleService.CheckstyleResult result = service.buildCheckstyleResult(
                 tmp.resolve("repo"),
@@ -117,14 +136,13 @@ public class CheckstyleServiceParsingTest {
             throws Exception {
         Path root = tmp.resolve("root");
         Path repo = tmp.resolve("repo");
-        Files.createDirectories(root.resolve("packages"));
         Files.createDirectories(repo.resolve("src"));
         Path jar = createJarFile(tmp.resolve("checkstyle.jar"));
 
         String url = "https://example.com/checkstyle.xml";
-        seedCachedConfig(root, url);
+        seedCachedConfig(tmp, url);
 
-        CheckstyleService service = createService(new ProcessRunner() { }, jar);
+        CheckstyleService service = createService(new ProcessRunner() { }, jar, tmp);
 
         CheckstyleService.CheckstyleResult result = service.buildCheckstyleResult(
                 repo,
@@ -144,13 +162,12 @@ public class CheckstyleServiceParsingTest {
     ) throws Exception {
         Path root = tmp.resolve("root");
         Path repo = tmp.resolve("repo");
-        Files.createDirectories(root.resolve("packages"));
         Files.createDirectories(repo.resolve("src"));
         Files.writeString(repo.resolve("src").resolve("Student.java"), "class Student {}");
         Path jar = createJarFile(tmp.resolve("checkstyle.jar"));
 
         String url = "https://example.com/checkstyle.xml";
-        seedCachedConfig(root, url);
+        seedCachedConfig(tmp, url);
 
         ProcessRunner failingRunner = new ProcessRunner() {
             @Override
@@ -158,7 +175,7 @@ public class CheckstyleServiceParsingTest {
                 return new ProcessResult(-1, List.of("runner failed"));
             }
         };
-        CheckstyleService service = createService(failingRunner, jar);
+        CheckstyleService service = createService(failingRunner, jar, tmp);
 
         CheckstyleService.CheckstyleResult result = service.buildCheckstyleResult(
                 repo,
@@ -179,13 +196,12 @@ public class CheckstyleServiceParsingTest {
     ) throws Exception {
         Path root = tmp.resolve("root");
         Path repo = tmp.resolve("repo");
-        Files.createDirectories(root.resolve("packages"));
         Files.createDirectories(repo.resolve("src").resolve("demo"));
         Files.writeString(repo.resolve("src").resolve("demo").resolve("Student.java"), "class Student {}");
         Path jar = createJarFile(tmp.resolve("checkstyle.jar"));
 
         String url = "https://example.com/checkstyle.xml";
-        seedCachedConfig(root, url);
+        seedCachedConfig(tmp, url);
 
         ProcessRunner runner = new ProcessRunner() {
             @Override
@@ -195,7 +211,7 @@ public class CheckstyleServiceParsingTest {
                 return new ProcessResult(1, List.of(line));
             }
         };
-        CheckstyleService service = createService(runner, jar);
+        CheckstyleService service = createService(runner, jar, tmp);
 
         CheckstyleService.CheckstyleResult result = service.buildCheckstyleResult(
                 repo,
@@ -210,9 +226,12 @@ public class CheckstyleServiceParsingTest {
         assertTrue(result.markdown().contains("### demo/Student.java"));
     }
 
-    private CheckstyleService createService(ProcessRunner runner, Path jarPath) {
-        ServiceLogger logger = _ -> { };
-        return new CheckstyleService(runner, logger, jarPath);
+    private CheckstyleService createService(ProcessRunner runner,
+                                            Path jarPath,
+                                            Path appDataRoot) {
+        ServiceLogger logger = msg -> { };
+        ToolArtifactService artifactService = new ToolArtifactService(appDataRoot);
+        return new CheckstyleService(runner, logger, jarPath, artifactService);
     }
 
     private Path createJarFile(Path jarPath) throws IOException {
@@ -220,10 +239,10 @@ public class CheckstyleServiceParsingTest {
         return Files.writeString(jarPath, "jar placeholder");
     }
 
-    private void seedCachedConfig(Path selectedRootPath, String url) throws IOException {
-        Path packagesDir = selectedRootPath.resolve("packages");
-        Files.createDirectories(packagesDir);
-        Files.writeString(packagesDir.resolve("checkstyle.xml"), "<module name=\"Checker\"/>");
-        Files.writeString(packagesDir.resolve("checkstyle-url.txt"), url + System.lineSeparator());
+    private void seedCachedConfig(Path appDataRoot, String url) throws IOException {
+        ToolArtifactService artifactService = new ToolArtifactService(appDataRoot);
+        Path cacheDir = artifactService.checkstyleCacheRoot();
+        Files.writeString(cacheDir.resolve("checkstyle.xml"), "<module name=\"Checker\"/>");
+        Files.writeString(cacheDir.resolve("checkstyle-url.txt"), url + System.lineSeparator());
     }
 }

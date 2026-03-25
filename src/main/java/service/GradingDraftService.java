@@ -21,6 +21,7 @@ import java.util.regex.Pattern;
 public class GradingDraftService {
 
     private static final String HTML_EXTENSION = ".html";
+    private static final String FEEDBACK_FOLDER_NAME = "feedback";
     private static final String COMMENTS_SUMMARY_BEGIN = "<!-- COMMENTS_SUMMARY_BEGIN -->";
     private static final String COMMENTS_SUMMARY_END = "<!-- COMMENTS_SUMMARY_END -->";
     private static final String RUBRIC_TABLE_BEGIN = "<!-- RUBRIC_TABLE_BEGIN -->";
@@ -76,6 +77,12 @@ public class GradingDraftService {
     public String loadReportMarkdown(String assignmentId,
                                      String studentPackage,
                                      Path rootPath) {
+        return loadReportMarkdownResult(assignmentId, studentPackage, rootPath).markdown();
+    }
+
+    public LoadReportResult loadReportMarkdownResult(String assignmentId,
+                                                     String studentPackage,
+                                                     Path rootPath) {
 
         Objects.requireNonNull(assignmentId);
         Objects.requireNonNull(studentPackage);
@@ -84,14 +91,14 @@ public class GradingDraftService {
         Path reportPath = buildReportPath(assignmentId, studentPackage, rootPath);
 
         if (!Files.exists(reportPath) || !Files.isRegularFile(reportPath)) {
-            return "";
+            return new LoadReportResult(true, false, "", "");
         }
 
         try {
             String html = Files.readString(reportPath);
-            return htmlWrapper.extractMarkdown(html);
+            return new LoadReportResult(true, true, htmlWrapper.extractMarkdown(html), "");
         } catch (IOException e) {
-            return "";
+            return new LoadReportResult(false, true, "", e.getMessage());
         }
     }
 
@@ -99,6 +106,14 @@ public class GradingDraftService {
                                    String studentPackage,
                                    Path rootPath,
                                    String markdown) throws IOException {
+        saveReportMarkdown(assignmentId, studentPackage, rootPath, markdown, null);
+    }
+
+    public void saveReportMarkdown(String assignmentId,
+                                   String studentPackage,
+                                   Path rootPath,
+                                   String markdown,
+                                   Path feedbackRootOverride) throws IOException {
 
         Objects.requireNonNull(assignmentId);
         Objects.requireNonNull(studentPackage);
@@ -111,6 +126,12 @@ public class GradingDraftService {
         String html = htmlWrapper.wrapMarkdownAsHtml(title, exportedMarkdown);
 
         reportFileWriter.write(reportPath, html);
+        writeFeedbackCopy(
+                rootPath,
+                reportPath.getFileName().toString(),
+                html,
+                feedbackRootOverride
+        );
     }
 
     private String normalizeForSavedReport(String markdown) {
@@ -194,6 +215,34 @@ public class GradingDraftService {
                 Files.deleteIfExists(tempFile);
             }
         }
+    }
+
+    private void writeFeedbackCopy(Path rootPath,
+                                   String reportFileName,
+                                   String html,
+                                   Path feedbackRootOverride) throws IOException {
+        Path feedbackRoot = feedbackRootOverride == null
+                ? resolveFeedbackRoot(rootPath)
+                : feedbackRootOverride;
+        Path feedbackDir = feedbackRoot.resolve(FEEDBACK_FOLDER_NAME);
+        Path feedbackReportPath = feedbackDir.resolve(reportFileName);
+        writeReportFileAtomically(feedbackReportPath, html);
+    }
+
+    private Path resolveFeedbackRoot(Path rootPath) {
+        Path current = rootPath;
+        while (current != null) {
+            Path name = current.getFileName();
+            if (name != null && "packages".equals(name.toString())) {
+                Path parent = current.getParent();
+                if (parent != null) {
+                    return parent;
+                }
+                break;
+            }
+            current = current.getParent();
+        }
+        return rootPath;
     }
 
     private Path buildReportPath(String assignmentId,
@@ -309,13 +358,11 @@ public class GradingDraftService {
         for (int i = feedbackHeaderLine + 1; i < lines.length; i++) {
             String line = lines[i];
             String trimmed = line == null ? "" : line.trim();
-            boolean isSectionHeading = trimmed.startsWith("## ");
+            boolean isSectionHeading = isTopLevelSectionHeading(trimmed);
+            boolean isGeneratedSourceHeading = isLikelyGeneratedSourceHeading(lines, i);
 
-            if (isSectionHeading) {
-                if (sawFeedbackContent) {
-                    break;
-                }
-                continue;
+            if (isSectionHeading || isGeneratedSourceHeading) {
+                break;
             }
 
             if (!sawFeedbackContent && trimmed.isEmpty()) {
@@ -327,6 +374,40 @@ public class GradingDraftService {
         }
 
         return trimSurroundingBlankLines(feedbackBuilder.toString());
+    }
+
+    private boolean isLikelyGeneratedSourceHeading(String[] lines, int index) {
+        if (lines == null || index < 0 || index >= lines.length) {
+            return false;
+        }
+
+        String line = lines[index];
+        String trimmed = line == null ? "" : line.trim();
+        if (trimmed.isBlank() || trimmed.startsWith(">") || !trimmed.startsWith("### ")) {
+            return false;
+        }
+
+        int maxLookahead = Math.min(lines.length - 1, index + 3);
+        for (int j = index + 1; j <= maxLookahead; j++) {
+            String next = lines[j];
+            String nextTrimmed = next == null ? "" : next.trim();
+            if (nextTrimmed.isEmpty()) {
+                continue;
+            }
+            return nextTrimmed.startsWith("```");
+        }
+
+        return false;
+    }
+
+    private boolean isTopLevelSectionHeading(String trimmedLine) {
+        if (trimmedLine == null || trimmedLine.isBlank()) {
+            return false;
+        }
+        if (trimmedLine.startsWith(">")) {
+            return false;
+        }
+        return trimmedLine.startsWith("## ");
     }
 
     private String stripFeedbackHeader(String blockContents) {
@@ -370,5 +451,11 @@ public class GradingDraftService {
     @FunctionalInterface
     interface ReportFileWriter {
         void write(Path reportPath, String html) throws IOException;
+    }
+
+    public record LoadReportResult(boolean readOk,
+                                   boolean reportExists,
+                                   String markdown,
+                                   String message) {
     }
 }

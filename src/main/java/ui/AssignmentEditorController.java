@@ -205,8 +205,10 @@ public class AssignmentEditorController {
         expectedFiles.clear();
         if (workingCopy.getExpectedFiles() != null) {
             for (String s : workingCopy.getExpectedFiles()) {
-                if (s == null) continue;
-                String name = Path.of(s).getFileName().toString();
+                if (s == null) {
+                    continue;
+                }
+                String name = s.trim();
                 if (!name.isBlank() && !expectedFiles.contains(name)) {
                     expectedFiles.add(name);
                 }

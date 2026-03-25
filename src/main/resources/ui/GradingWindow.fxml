@@ -21,11 +21,12 @@
             <VBox spacing="12">
                 <HBox spacing="12">
                     <Button text="Save Drafts" onAction="#onSaveDrafts"/>
-                    <Button fx:id="saveAndExportButton" text="Save + Export" defaultButton="true"
+                    <Button fx:id="saveAndExportButton" text="Save + Push" defaultButton="true"
                             onAction="#onSaveAndExport"/>
                 </HBox>
                 <HBox spacing="12">
                     <Button text="Export Graded HTML" onAction="#onExportGradedHtml"/>
+                    <Button fx:id="pushReportsButton" text="Push Reports" onAction="#onPushReports"/>
                     <Button text="Preview HTML" onAction="#onPreviewDraft"/>
                 </HBox>
                 <HBox spacing="12">

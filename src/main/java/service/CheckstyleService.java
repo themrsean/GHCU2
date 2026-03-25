@@ -21,19 +21,35 @@ import java.util.TreeMap;
 import java.util.Objects;
 import java.util.stream.Stream;
 
+import util.AppDataUtil;
+
 public class CheckstyleService {
 
     private final ProcessRunner processRunner;
     private final ServiceLogger logger;
     private final Path checkstyleJar;
+    private final ToolArtifactService toolArtifactService;
 
     public CheckstyleService(ProcessRunner processRunner,
                              ServiceLogger logger,
                              Path checkstyleJar) {
+        this(
+                processRunner,
+                logger,
+                checkstyleJar,
+                new ToolArtifactService(AppDataUtil.appDataDir())
+        );
+    }
+
+    CheckstyleService(ProcessRunner processRunner,
+                      ServiceLogger logger,
+                      Path checkstyleJar,
+                      ToolArtifactService toolArtifactService) {
 
         this.processRunner = Objects.requireNonNull(processRunner);
         this.logger = Objects.requireNonNull(logger);
         this.checkstyleJar = Objects.requireNonNull(checkstyleJar);
+        this.toolArtifactService = Objects.requireNonNull(toolArtifactService);
     }
 
     public CheckstyleResult buildCheckstyleResult(Path repoPath,
@@ -212,13 +228,10 @@ public class CheckstyleService {
     }
 
     private Path downloadCheckstyleConfig(Path selectedRootPath, String url) throws IOException {
-        Path packagesRoot = selectedRootPath.resolve("packages");
-        if (!Files.exists(packagesRoot)) {
-            Files.createDirectories(packagesRoot);
-        }
+        Path cacheRoot = toolArtifactService.checkstyleCacheRoot();
 
-        Path configFile = packagesRoot.resolve("checkstyle.xml");
-        Path urlFile = packagesRoot.resolve("checkstyle-url.txt");
+        Path configFile = cacheRoot.resolve("checkstyle.xml");
+        Path urlFile = cacheRoot.resolve("checkstyle-url.txt");
 
         String previousUrl = "";
         if (Files.exists(urlFile)) {

@@ -20,6 +20,17 @@ public class GradingDraftSessionServiceTest {
     }
 
     @Test
+    public void saveEditorState_withSelection_persistsSelectionBounds() {
+        GradingDraftSessionService service = new GradingDraftSessionService();
+
+        service.saveEditorState("pkg1", "# Feedback", 3, 9);
+
+        assertEquals(3, service.getSelectionStart("pkg1"));
+        assertEquals(9, service.getSelectionEnd("pkg1"));
+        assertEquals(9, service.getCaretPosition("pkg1"));
+    }
+
+    @Test
     public void updateFromEditorIfPresent_updatesExistingDraftOnly() {
         GradingDraftSessionService service = new GradingDraftSessionService();
         service.saveEditorState("pkg1", "initial", 1);
@@ -31,6 +42,19 @@ public class GradingDraftSessionServiceTest {
         assertEquals(5, service.getCaretPosition("pkg1"));
         assertFalse(service.isLoadedFromDisk("pkg2"));
         assertEquals("", service.getMarkdown("pkg2"));
+    }
+
+    @Test
+    public void updateSelectionIfPresent_ignoresMissingDraft_andNormalizesOrder() {
+        GradingDraftSessionService service = new GradingDraftSessionService();
+        service.saveEditorState("pkg1", "initial", 0);
+
+        service.updateSelectionIfPresent("pkg1", 8, 2);
+        service.updateSelectionIfPresent("pkg2", 5, 7);
+
+        assertEquals(2, service.getSelectionStart("pkg1"));
+        assertEquals(8, service.getSelectionEnd("pkg1"));
+        assertFalse(service.isLoadedFromDisk("pkg2"));
     }
 
     @Test

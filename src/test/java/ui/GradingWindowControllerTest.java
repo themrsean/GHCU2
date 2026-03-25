@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -92,7 +93,7 @@ public class GradingWindowControllerTest {
     }
 
     @Test
-    public void preflightPush_rejectsUnrelatedChanges(@TempDir Path tmp) throws Exception {
+    public void preflightPush_allowsUnrelatedChanges(@TempDir Path tmp) throws Exception {
         GradingWindowController controller = new GradingWindowController();
         Path repoDir = createRepoWithUpstream(tmp);
 
@@ -106,12 +107,12 @@ public class GradingWindowControllerTest {
                 "report.html"
         );
 
-        assertFalse(readBoolean(result, "allowed"));
-        assertTrue(readString(result, "message").contains("repository has unrelated changes"));
+        assertTrue(readBoolean(result, "allowed"));
+        assertEquals("", readString(result, "message"));
     }
 
     @Test
-    public void preflightPush_allowsOnlyReportFileChange(@TempDir Path tmp) throws Exception {
+    public void preflightPush_allowsReportFileChange(@TempDir Path tmp) throws Exception {
         GradingWindowController controller = new GradingWindowController();
         Path repoDir = createRepoWithUpstream(tmp);
 
@@ -347,6 +348,34 @@ public class GradingWindowControllerTest {
     }
 
     @Test
+    public void saveDraftsWorker_skipsStudentsWithReportLoadFailures(@TempDir Path tmp)
+            throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+        Path repoDir = tmp.resolve("repo-save-skip");
+        Files.createDirectories(repoDir);
+        Path mappingFile = tmp.resolve("mappings.json");
+        writeMappingFile(mappingFile, Map.of("pkg1", repoDir.toString()));
+
+        setField(controller, "assignmentId", "A1");
+        setField(controller, "mappingsPath", mappingFile);
+        setField(controller, "currentStudent", "pkg1");
+
+        addStudentPackage(controller, "pkg1");
+        putDraft(controller, "pkg1", "# Feedback", true);
+        Field failedLoadsField = controller.getClass().getDeclaredField("reportLoadFailureStudents");
+        failedLoadsField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Set<String> failedLoads = (Set<String>) failedLoadsField.get(controller);
+        failedLoads.add("pkg1");
+
+        Object result = invokeMethod(controller, "saveDraftsWorker");
+
+        assertFalse(readBoolean(result, "success"));
+        assertTrue(readString(result, "message").contains("Skipped 1 report(s) due to load errors."));
+        assertFalse(Files.exists(repoDir.resolve("A1pkg1.html")));
+    }
+
+    @Test
     public void formatPushCompletionMessage_includesDetailOnlyWhenPresent() {
         String withDetails = GradingWindowController.formatPushCompletionMessage(
                 1,
@@ -392,6 +421,29 @@ public class GradingWindowControllerTest {
         assertTrue(markdown.contains("> Line one"));
         assertTrue(markdown.contains("> Line two"));
         assertTrue(markdown.endsWith(System.lineSeparator() + System.lineSeparator()));
+    }
+
+    @Test
+    public void makeAnchorIdFromComment_sameCommentId_remainsStable() throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+        CommentDef def = new CommentDef();
+        def.setCommentId("late-submission");
+
+        String first = (String) invokeMethod(
+                controller,
+                "makeAnchorIdFromComment",
+                new Class<?>[] {CommentDef.class},
+                def
+        );
+        String second = (String) invokeMethod(
+                controller,
+                "makeAnchorIdFromComment",
+                new Class<?>[] {CommentDef.class},
+                def
+        );
+
+        assertEquals("cmt_late-submission", first);
+        assertEquals("cmt_late-submission", second);
     }
 
     @Test
@@ -690,6 +742,67 @@ public class GradingWindowControllerTest {
     }
 
     @Test
+    public void normalizeForLegacyEditorView_keepsRubricNormalizationOutOfSourceAndTestSections()
+            throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+        String input = """
+                # Lab Assignment 7 - Program Stack
+
+                >> | Earned | Possible | Criteria                                          |
+                >> | ------ | -------- | ------------------------------------------------- |
+                >> |      0 |       15 | CheckStyle Errors |
+                >> |     10 |       10 | Intermediate Commits |
+                >> |     60 |       60 | Code Implementation and Structure |
+                >> |  11.60 |       15 | Unit Tests |
+                >> |  81.60 |      100 | TOTAL |
+
+                >
+                >
+                > # Feedback
+                > * Nice work
+
+                ## Source Code
+
+                ### IntStack.java
+
+                ```java
+                String headerAndFooter =
+                        \"\"\"
+                                |          |
+                                |----------|
+                                +----------+
+                                \"\"\";
+                ```
+
+                ## Failed Unit Tests
+
+                ```
+                - **ReturnFromMethodTests.returnFromMethodEmptiesSingleFrame()** — expected: <| | |----------| +----------+ > but was: <null>
+                ```
+                """;
+
+        String normalized = (String) invokeMethod(
+                controller,
+                "normalizeForLegacyEditorView",
+                new Class<?>[] {String.class},
+                input
+        );
+
+        int rubricIndex = normalized.indexOf(">> | Earned | Possible | Criteria");
+        int sourceIndex = normalized.indexOf("## Source Code");
+        int boxLineIndex = normalized.indexOf("|----------|");
+        int failedTestsIndex = normalized.indexOf("## Failed Unit Tests");
+
+        assertTrue(rubricIndex >= 0);
+        assertTrue(sourceIndex >= 0);
+        assertTrue(failedTestsIndex >= 0);
+        assertTrue(rubricIndex < sourceIndex);
+        assertTrue(boxLineIndex > sourceIndex);
+        assertTrue(normalized.contains("expected: <| | |----------| +----------+ >"));
+        assertFalse(normalized.contains(">> |  81.60 |      100 | TOTAL |"));
+    }
+
+    @Test
     public void loadInitialMarkdownForStudent_usesRepoReportAndEnsuresPatchSections(@TempDir Path tmp)
             throws Exception {
         GradingWindowController controller = new GradingWindowController();
@@ -772,14 +885,109 @@ public class GradingWindowControllerTest {
     }
 
     @Test
+    public void editorNavigationHelpers_computeHomeEndAndPageMoves() throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+        String text = String.join(
+                System.lineSeparator(),
+                "alpha",
+                "beta",
+                "gamma",
+                "delta",
+                "epsilon"
+        );
+
+        int lineStart = (int) invokeMethod(
+                controller,
+                "lineStartOffset",
+                new Class<?>[] {String.class, int.class},
+                text,
+                8
+        );
+        int lineEnd = (int) invokeMethod(
+                controller,
+                "lineEndOffset",
+                new Class<?>[] {String.class, int.class},
+                text,
+                8
+        );
+
+        assertEquals(6, lineStart);
+        assertEquals(10, lineEnd);
+
+        int pageUp = (int) invokeMethod(
+                controller,
+                "moveCaretByLines",
+                new Class<?>[] {String.class, int.class, int.class},
+                text,
+                text.length(),
+                -30
+        );
+        int pageDown = (int) invokeMethod(
+                controller,
+                "moveCaretByLines",
+                new Class<?>[] {String.class, int.class, int.class},
+                text,
+                0,
+                30
+        );
+
+        assertEquals(5, pageUp);
+        assertEquals(text.length(), pageDown);
+    }
+
+    @Test
+    public void sanitizePreviewMarkdown_escapesPipeAndAngleContentInsideFences_only() {
+        String markdown = String.join(
+                System.lineSeparator(),
+                "# Title",
+                "",
+                ">> | Earned | Possible | Criteria |",
+                ">> | ------ | -------- | -------- |",
+                "",
+                "```java",
+                "String box = \"\"\"",
+                "        |          |",
+                "        |----------|",
+                "        +----------+",
+                "        \"\"\";",
+                "```",
+                "",
+                "Outside | stays | plain |"
+        );
+
+        String sanitized = GradingWindowController.sanitizePreviewMarkdown(markdown);
+
+        assertTrue(sanitized.contains(">> | Earned | Possible | Criteria |"));
+        assertTrue(sanitized.contains("Outside | stays | plain |"));
+        assertTrue(sanitized.contains("&#124;----------&#124;"));
+        assertTrue(sanitized.contains("&quot;") || sanitized.contains("\"\"\""));
+        assertTrue(sanitized.contains("```java"));
+        assertTrue(sanitized.contains("```"));
+    }
+
+    @Test
+    public void sanitizePreviewMarkdown_handlesTildeFences() {
+        String markdown = String.join(
+                System.lineSeparator(),
+                "~~~",
+                "|----------|",
+                "~~~"
+        );
+
+        String sanitized = GradingWindowController.sanitizePreviewMarkdown(markdown);
+
+        assertTrue(sanitized.contains("~~~"));
+        assertTrue(sanitized.contains("&#124;----------&#124;"));
+    }
+
+    @Test
     public void loadComments_invalidJson_fallsBackToEmptyLibrary(@TempDir Path tmp)
             throws Exception {
         String originalHome = System.getProperty("user.home");
         try {
             System.setProperty("user.home", tmp.toString());
-            Path commentsPath = tmp.resolve("Library")
-                    .resolve("Application Support")
-                    .resolve("GHCU2")
+            Path commentsPath = tmp.resolve(".gh-classroom-utils")
+                    .resolve("comments")
                     .resolve("comments.json");
             Files.createDirectories(commentsPath.getParent());
             Files.writeString(commentsPath, "{invalid");
@@ -807,9 +1015,8 @@ public class GradingWindowControllerTest {
         String originalHome = System.getProperty("user.home");
         try {
             System.setProperty("user.home", tmp.toString());
-            Path commentsPath = tmp.resolve("Library")
-                    .resolve("Application Support")
-                    .resolve("GHCU2")
+            Path commentsPath = tmp.resolve(".gh-classroom-utils")
+                    .resolve("comments")
                     .resolve("comments.json");
             Files.createDirectories(commentsPath.getParent());
             Files.writeString(
@@ -849,6 +1056,58 @@ public class GradingWindowControllerTest {
     }
 
     @Test
+    public void loadComments_usesLegacyPathWhenCanonicalMissing(@TempDir Path tmp)
+            throws Exception {
+        String originalHome = System.getProperty("user.home");
+        String originalOs = System.getProperty("os.name");
+        try {
+            System.setProperty("user.home", tmp.toString());
+            System.setProperty("os.name", "Mac OS X");
+            Path legacyCommentsPath = tmp.resolve("Library")
+                    .resolve("Application Support")
+                    .resolve("GHCU2")
+                    .resolve("comments.json");
+            Files.createDirectories(legacyCommentsPath.getParent());
+            Files.writeString(
+                    legacyCommentsPath,
+                    """
+                    {
+                      "schemaVersion": 1,
+                      "comments": [
+                        {
+                          "commentId": "cLegacy",
+                          "assignmentKey": "A1",
+                          "rubricItemId": "ri_impl",
+                          "title": "Legacy",
+                          "bodyMarkdown": "From legacy path",
+                          "pointsDeducted": 1
+                        }
+                      ]
+                    }
+                    """
+            );
+
+            GradingWindowController controller = new GradingWindowController();
+            invokeMethod(controller, "loadComments");
+
+            Field libraryField = controller.getClass().getDeclaredField("commentLibrary");
+            libraryField.setAccessible(true);
+            Object library = libraryField.get(controller);
+            Method getComments = library.getClass().getDeclaredMethod("getComments");
+            @SuppressWarnings("unchecked")
+            List<Object> comments = (List<Object>) getComments.invoke(library);
+            assertEquals(1, comments.size());
+        } finally {
+            if (originalHome != null) {
+                System.setProperty("user.home", originalHome);
+            }
+            if (originalOs != null) {
+                System.setProperty("os.name", originalOs);
+            }
+        }
+    }
+
+    @Test
     public void computePointsLostInTextForRubric_sumsValidAndIgnoresMalformedLines() {
         String text = """
                 > * -2 points (ri_impl)
@@ -860,6 +1119,44 @@ public class GradingWindowControllerTest {
 
         int lost = GradingWindowController.computePointsLostInTextForRubric(text, "ri_impl");
         assertEquals(5, lost);
+    }
+
+    @Test
+    public void findRepoDirForStudentPackage_reconstructsUsingReportFilePrefix(@TempDir Path tmp)
+            throws Exception {
+        String originalHome = System.getProperty("user.home");
+        try {
+            System.setProperty("user.home", tmp.toString());
+
+            Path root = tmp.resolve("root");
+            Path reposContainer = root.resolve("class-submissions");
+            Path repoDir = reposContainer.resolve("student-repo-1");
+            Files.createDirectories(repoDir);
+            Files.writeString(repoDir.resolve("A1pkg1.html"), "feedback");
+
+            GradingWindowController controller = new GradingWindowController();
+            setField(controller, "mappingsPath", null);
+            setField(controller, "assignmentId", "CSC1120A1");
+            setField(controller, "reportFilePrefix", "A1");
+            setField(controller, "rootPath", root);
+
+            Path resolved = (Path) invokeMethod(
+                    controller,
+                    "findRepoDirForStudentPackage",
+                    new Class<?>[] {String.class},
+                    "pkg1"
+            );
+
+            assertEquals(repoDir, resolved);
+            Path expectedMappingsFile = tmp.resolve(".gh-classroom-utils")
+                    .resolve("mappings")
+                    .resolve("mappings-A1.json");
+            assertTrue(Files.exists(expectedMappingsFile));
+        } finally {
+            if (originalHome != null) {
+                System.setProperty("user.home", originalHome);
+            }
+        }
     }
 
     @Test

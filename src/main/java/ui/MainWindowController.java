@@ -57,11 +57,13 @@ import service.ServiceLogger;
 import service.SourceCodeService;
 import service.UnitTestService;
 import service.steps.WorkflowStep;
+import util.AppDataUtil;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -1130,9 +1132,24 @@ public class MainWindowController implements Initializable {
             if (rawFile == null) {
                 continue;
             }
-            String fileName = Path.of(rawFile).getFileName().toString().trim();
-            if (!fileName.isEmpty() && !cleaned.contains(fileName)) {
-                cleaned.add(fileName);
+            String trimmed = rawFile.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            String normalized = trimmed.replace("\\", "/");
+            if (normalized.endsWith("/")) {
+                continue;
+            }
+            try {
+                Path candidate = Path.of(normalized);
+                if (candidate.getFileName() == null) {
+                    continue;
+                }
+            } catch (InvalidPathException e) {
+                continue;
+            }
+            if (!cleaned.contains(normalized)) {
+                cleaned.add(normalized);
             }
         }
         cleaned.sort(String::compareTo);
@@ -1541,13 +1558,7 @@ public class MainWindowController implements Initializable {
     }
 
     private Path appDataDir() {
-        String home = System.getProperty("user.home");
-        if (home == null || home.isBlank()) {
-            home = ".";
-        }
-
-        final String folderName = ".gh-classroom-utils";
-        return Path.of(home).resolve(folderName);
+        return AppDataUtil.appDataDir();
     }
 
     private Path ensureDir(Path dir) {

@@ -38,21 +38,47 @@ public class GradingReportEditorService {
         String text = markdown == null ? "" : markdown;
         String existingRubric =
                 extractBlockContents(text, RUBRIC_TABLE_BEGIN, RUBRIC_TABLE_END);
-
-        if (existingRubric == null || existingRubric.isBlank()) {
-            extractRawRubricTable(text);
-            existingRubric = extractFirstRawRubricTable(text);
-        }
         String existingSummary =
                 extractBlockContents(text, COMMENTS_SUMMARY_BEGIN, COMMENTS_SUMMARY_END);
 
-        String rawRubricTable = extractRawRubricTableBlockquote(text);
+        RawRubricTableMatch displacedRawTable = null;
+        if (existingRubric == null || existingRubric.isBlank()) {
+            displacedRawTable = findFirstRawRubricTable(text);
+            if (displacedRawTable != null) {
+                existingRubric = displacedRawTable.tableMarkdown();
+            }
+        }
 
-        text = cleanBrokenTitleLine(text);
-        text = removeAllBlocks(text, RUBRIC_TABLE_BEGIN, RUBRIC_TABLE_END);
-        text = removeAllBlocks(text, COMMENTS_SUMMARY_BEGIN, COMMENTS_SUMMARY_END);
-        text = removeStandaloneRubricHeadings(text);
-        text = removeRawRubricTables(text);
+        String working = text;
+        if (displacedRawTable != null) {
+            working = removeRawRubricTableAt(
+                    working,
+                    displacedRawTable.startIndex(),
+                    displacedRawTable.endIndexExclusive()
+            );
+        }
+        working = removeAllBlocks(working, RUBRIC_TABLE_BEGIN, RUBRIC_TABLE_END);
+        working = removeAllBlocks(working, COMMENTS_SUMMARY_BEGIN, COMMENTS_SUMMARY_END);
+
+        int preambleBoundary = findPreambleBoundary(working);
+        String preamble = working.substring(0, preambleBoundary);
+        String remainder = working.substring(preambleBoundary);
+
+        if ((existingRubric == null || existingRubric.isBlank())) {
+            extractRawRubricTable(preamble);
+            existingRubric = extractFirstRawRubricTable(preamble);
+        }
+        if (existingSummary == null) {
+            existingSummary = "";
+        }
+
+        String rawRubricTable = extractRawRubricTableBlockquote(preamble);
+
+        preamble = cleanBrokenTitleLine(preamble);
+        preamble = removeAllBlocks(preamble, RUBRIC_TABLE_BEGIN, RUBRIC_TABLE_END);
+        preamble = removeAllBlocks(preamble, COMMENTS_SUMMARY_BEGIN, COMMENTS_SUMMARY_END);
+        preamble = removeStandaloneRubricHeadings(preamble);
+        preamble = removeRawRubricTables(preamble);
 
         String rubricInside;
         if (rawRubricTable != null && !rawRubricTable.isBlank()) {
@@ -80,27 +106,76 @@ public class GradingReportEditorService {
                         + summaryInside + System.lineSeparator()
                         + COMMENTS_SUMMARY_END;
 
-        int insertPos = findInsertPosition(text);
+        int insertPos = findInsertPosition(preamble);
+        String before = preamble.substring(0, insertPos).replaceFirst("(?s)\\R*\\z", "");
+        String after = preamble.substring(insertPos).replaceFirst("(?s)^\\R*", "");
+        String newline = System.lineSeparator();
 
         StringBuilder out = new StringBuilder();
-        out.append(text, 0, insertPos);
-
-        if (out.length() > 0 && out.charAt(out.length() - 1) != '\n') {
-            out.append(System.lineSeparator());
-        }
-        out.append(System.lineSeparator());
-
-        out.append(rubricBlock)
-                .append(System.lineSeparator())
-                .append(System.lineSeparator())
+        out.append(before)
+                .append(newline)
+                .append(newline)
+                .append(rubricBlock)
+                .append(newline)
+                .append(newline)
                 .append(summaryBlock)
-                .append(System.lineSeparator())
-                .append(System.lineSeparator());
-
-        out.append(text.substring(insertPos));
+                .append(newline)
+                .append(newline)
+                .append(after);
+        out.append(remainder);
 
         String normalized = out.toString();
         return normalized.replaceFirst("^(\\s*\\R)+", "");
+    }
+
+    private String removeRawRubricTableAt(String text,
+                                          int startIndex,
+                                          int endIndexExclusive) {
+        if (text == null || text.isEmpty()) {
+            return "";
+        }
+        int safeStart = Math.max(0, Math.min(startIndex, text.length()));
+        int safeEnd = Math.max(safeStart, Math.min(endIndexExclusive, text.length()));
+        return text.substring(0, safeStart) + text.substring(safeEnd);
+    }
+
+    private RawRubricTableMatch findFirstRawRubricTable(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+
+        final String pattern =
+                "(?m)^\\s*>>\\s*\\|\\s*Earned\\s*\\|\\s*Possible\\s*\\|\\s*Criteria\\s*\\|[^\\r\\n]*\\R"
+                        + "^\\s*>>\\s*\\|\\s*[- ]+\\s*\\|\\s*[- ]+\\s*\\|\\s*[- ]+\\s*\\|[^\\r\\n]*\\R"
+                        + "(^\\s*>>\\s*\\|[^\\r\\n]*\\|\\s*\\R)+";
+
+        Pattern compiled = Pattern.compile(pattern);
+        Matcher matcher = compiled.matcher(text);
+        if (!matcher.find()) {
+            return null;
+        }
+
+        String table = matcher.group();
+        return new RawRubricTableMatch(matcher.start(), matcher.end(), table.trim());
+    }
+
+    private record RawRubricTableMatch(int startIndex,
+                                       int endIndexExclusive,
+                                       String tableMarkdown) {
+    }
+
+    private int findPreambleBoundary(String text) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
+        Pattern majorSectionPattern = Pattern.compile(
+                "(?m)^##\\s+(Source Code|Checkstyle Violations|Failed Unit Tests|Commit History\\b).*"
+        );
+        Matcher matcher = majorSectionPattern.matcher(text);
+        if (matcher.find()) {
+            return matcher.start();
+        }
+        return text.length();
     }
 
     public String buildFreshReportSkeleton(String studentPackage) {
@@ -166,35 +241,27 @@ public class GradingReportEditorService {
     }
 
     private int findInsertPosition(String text) {
-        int insertPos = 0;
-        String[] lines = text.split("\\R", -1);
-        int running = 0;
-        boolean foundHeading = false;
-        boolean foundInsert = false;
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
 
-        for (int i = 0; i < lines.length && !foundInsert; i++) {
-            String line = lines[i];
-            String trimmed = line == null ? "" : line.trim();
-            running += (line == null ? 0 : line.length()) + 1;
+        Pattern headingPattern = Pattern.compile("(?m)^\\s*#\\s+.*$");
+        Matcher headingMatcher = headingPattern.matcher(text);
+        if (!headingMatcher.find()) {
+            return 0;
+        }
 
-            if (!foundHeading && trimmed.startsWith("#")) {
-                foundHeading = true;
-            } else if (foundHeading && trimmed.isEmpty()) {
-                insertPos = running;
-                foundInsert = true;
+        int insertPos = headingMatcher.end();
+        while (insertPos < text.length()) {
+            char ch = text.charAt(insertPos);
+            if (ch == '\n' || ch == '\r') {
+                insertPos++;
+                continue;
             }
+            break;
         }
 
-        if (insertPos <= 0 || insertPos > text.length()) {
-            insertPos = 0;
-        }
-
-        while (insertPos < text.length()
-                && (text.charAt(insertPos) == '\n' || text.charAt(insertPos) == '\r')) {
-            insertPos++;
-        }
-
-        return insertPos;
+        return Math.max(0, Math.min(insertPos, text.length()));
     }
 
     private String extractRawRubricTable(String text) {
@@ -339,9 +406,9 @@ public class GradingReportEditorService {
         }
 
         final String pattern =
-                "(?ms)^\\s*>>\\s*\\|\\s*Earned\\s*\\|\\s*Possible\\s*\\|\\s*Criteria\\s*\\|.*\\R"
-                        + "^\\s*>>\\s*\\|\\s*[- ]+\\s*\\|\\s*[- ]+\\s*\\|\\s*[- ]+\\s*\\|.*\\R"
-                        + "(^\\s*>>\\s*\\|.*\\|\\s*\\R)+";
+                "(?m)^\\s*>>\\s*\\|\\s*Earned\\s*\\|\\s*Possible\\s*\\|\\s*Criteria\\s*\\|[^\\r\\n]*\\R"
+                        + "^\\s*>>\\s*\\|\\s*[- ]+\\s*\\|\\s*[- ]+\\s*\\|\\s*[- ]+\\s*\\|[^\\r\\n]*\\R"
+                        + "(^\\s*>>\\s*\\|[^\\r\\n]*\\|\\s*\\R)+";
 
         Pattern compiled = Pattern.compile(pattern);
         Matcher matcher = compiled.matcher(text);

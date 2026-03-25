@@ -211,7 +211,7 @@ class MainWindowControllerTest {
     }
 
     @Test
-    void normalizedExpectedFiles_trimsBasenamesAndDeduplicates() {
+    void normalizedExpectedFiles_preservesPaths_andDeduplicatesExactEntries() {
         List<String> cleaned = MainWindowController.normalizedExpectedFiles(Arrays.asList(
                 "src/main/java/Foo.java",
                 "Foo.java",
@@ -220,7 +220,10 @@ class MainWindowControllerTest {
                 "nested/view.fxml"
         ));
 
-        assertEquals(List.of("Foo.java", "view.fxml"), cleaned);
+        assertEquals(
+                List.of("Foo.java", "nested/view.fxml", "src/main/java/Foo.java", "view.fxml"),
+                cleaned
+        );
     }
 
     @Test
@@ -237,7 +240,7 @@ class MainWindowControllerTest {
                 "Bar.java"
         ));
 
-        assertEquals(List.of("Bar.java", "java"), cleaned);
+        assertEquals(List.of("Bar.java", "src/main/java/Bar.java"), cleaned);
     }
 
     @Test
@@ -555,7 +558,10 @@ class MainWindowControllerTest {
                 Arrays.asList("NewFile.java", "notes.txt", "Layout.fxml", "z.fxml", null)
         );
 
-        assertEquals(List.of("Existing.java", "Layout.fxml", "NewFile.java", "z.fxml"), merged);
+        assertEquals(
+                List.of("Layout.fxml", "NewFile.java", "src/main/java/Existing.java", "z.fxml"),
+                merged
+        );
     }
 
     @Test

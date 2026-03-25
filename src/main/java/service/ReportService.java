@@ -10,20 +10,34 @@ import model.RepoMapping;
 import model.RubricTableBuilder;
 
 import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.*;
 
 public class ReportService {
 
+    private static final String FEEDBACK_FOLDER_NAME = "feedback";
+
     private final AssignmentsFile assignmentsFile;
     private final ReportDependencies deps;
+    private final ReportFileWriter reportFileWriter;
 
     public ReportService(AssignmentsFile assignmentsFile,
                          ReportDependencies deps) {
+        this(assignmentsFile, deps, null);
+    }
+
+    ReportService(AssignmentsFile assignmentsFile,
+                  ReportDependencies deps,
+                  ReportFileWriter reportFileWriter) {
 
         this.assignmentsFile = Objects.requireNonNull(assignmentsFile);
         this.deps = Objects.requireNonNull(deps);
+        this.reportFileWriter = reportFileWriter == null
+                ? this::writeReportFileAtomically
+                : reportFileWriter;
     }
 
     public ReportGenerationResult generateReports(Assignment assignment,
@@ -120,8 +134,8 @@ public class ReportService {
                 );
                 String html = deps.wrapMarkdownAsHtml(pkg, markdown);
 
-                Files.deleteIfExists(reportPath);
-                Files.writeString(reportPath, html);
+                reportFileWriter.write(reportPath, html);
+                writeFeedbackCopy(selectedRootPath, reportFileName, html);
 
                 wroteAny = true;
                 deps.log("OK " + pkg + ": wrote report " + reportFileName);
@@ -135,6 +149,45 @@ public class ReportService {
         deps.log("Generate Reports complete.");
 
         return new ReportGenerationResult(wroteAny, hadFailures);
+    }
+
+    private void writeReportFileAtomically(Path reportPath,
+                                           String html) throws IOException {
+        Path parent = reportPath.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+
+        String prefix = reportPath.getFileName().toString();
+        Path tempFile = Files.createTempFile(parent, prefix, ".tmp");
+        boolean moved = false;
+
+        try {
+            Files.writeString(tempFile, html);
+            try {
+                Files.move(
+                        tempFile,
+                        reportPath,
+                        StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING
+                );
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(tempFile, reportPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+            moved = true;
+        } finally {
+            if (!moved) {
+                Files.deleteIfExists(tempFile);
+            }
+        }
+    }
+
+    private void writeFeedbackCopy(Path selectedRootPath,
+                                   String reportFileName,
+                                   String html) throws IOException {
+        Path feedbackDir = selectedRootPath.resolve(FEEDBACK_FOLDER_NAME);
+        Path feedbackReportPath = feedbackDir.resolve(reportFileName);
+        writeReportFileAtomically(feedbackReportPath, html);
     }
 
     private String buildReportMarkdown(Assignment assignment,
@@ -184,6 +237,7 @@ public class ReportService {
                         ">" + newline +
                         "> # Feedback" + newline +
                         feedbackMarkdown + newline + newline +
+                        "## Source Code" + newline + newline +
                         deps.buildSourceCodeMarkdown(assignment, studentPackage, repoPath) + newline + newline +
                         "## Checkstyle Violations" + newline + newline +
                         cs.markdown() + newline + newline +
@@ -258,5 +312,14 @@ public class ReportService {
         String buildCommitHistoryMarkdown(Path repoPath);
 
         String wrapMarkdownAsHtml(String title, String markdown);
+
+        default ToolArtifactService toolArtifactService() {
+            return null;
+        }
+    }
+
+    @FunctionalInterface
+    interface ReportFileWriter {
+        void write(Path reportPath, String html) throws IOException;
     }
 }

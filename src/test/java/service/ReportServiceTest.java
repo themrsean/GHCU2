@@ -115,6 +115,10 @@ public class ReportServiceTest {
         assertTrue(Files.exists(reportPath), "Report file should exist: " + reportPath);
         String content = Files.readString(reportPath);
         assertTrue(content.contains("username1"), "Report content should contain wrapped title");
+
+        Path feedbackCopy = root.resolve("feedback").resolve(expectedFileName);
+        assertTrue(Files.exists(feedbackCopy), "Feedback copy should exist: " + feedbackCopy);
+        assertEquals(content, Files.readString(feedbackCopy));
     }
 
     @Test
@@ -225,6 +229,7 @@ public class ReportServiceTest {
         assertTrue(markdown.contains(">> | Earned | Possible | Criteria"));
         assertTrue(markdown.contains("> # Feedback"));
         assertTrue(markdown.contains("> * Nice work!"));
+        assertTrue(markdown.contains("## Source Code"));
         assertTrue(markdown.matches(
                 "(?s).*## Failed Unit Tests\\R\\R```\\R_No failed unit tests\\._\\R```\\R\\R.*"
         ));
@@ -268,5 +273,96 @@ public class ReportServiceTest {
         assertFalse(result.wroteAny(), "wroteAny should be false when mapping is empty");
         assertFalse(result.hadFailures(), "hadFailures should be false for this failure mode");
         assertFalse(result.isSuccess(), "isSuccess should be false when nothing was written");
+    }
+
+    @Test
+    public void generateReports_writeFailure_preservesExistingReport() throws Exception {
+        AssignmentsFile af = new AssignmentsFile();
+
+        Assignment a = new Assignment();
+        a.setCourseCode("CSC101");
+        a.setAssignmentCode("A1");
+        a.setAssignmentName("Intro Assignment");
+
+        Path root = Files.createTempDirectory("rs-root-preserve");
+        Files.createDirectories(root.resolve("packages"));
+        Path mappingsPath = Files.createTempFile("mapping-preserve", ".json");
+        Path studentRepo = Files.createTempDirectory("student-repo-preserve");
+
+        Map<String, RepoMapping> mapping = new HashMap<>();
+        RepoMapping rm = new RepoMapping();
+        rm.setRepoPath(studentRepo.toString());
+        mapping.put("username1", rm);
+
+        String reportFileName = a.getAssignmentCode() + "username1.html";
+        Path reportPath = studentRepo.resolve(reportFileName);
+        String existingHtml = "<html><body>existing feedback</body></html>";
+        Files.writeString(reportPath, existingHtml);
+
+        ReportService.ReportDependencies deps = new ReportService.ReportDependencies() {
+            @Override public void log(String msg) { }
+            @Override public Map<String, RepoMapping> loadMapping(Path path) { return mapping; }
+            @Override public Path resolveRepoRoot(Path mappedRepoPath) { return mappedRepoPath; }
+            @Override public CheckstyleService.CheckstyleResult buildCheckstyleResult(Path repoPath) {
+                return new CheckstyleService.CheckstyleResult("_No checkstyle violations._", 0);
+            }
+            @Override
+            public UnitTestService.UnitTestResult buildUnitTestResultMarkdown(
+                    String studentPackage,
+                    Path repoPath
+            ) {
+                return new UnitTestService.UnitTestResult("_No failed unit tests._", 0, 0);
+            }
+            @Override
+            public Map<String, Integer> loadManualDeductionsFromGradingDraft(
+                    String assignmentId,
+                    String studentPackage,
+                    Path rootPath
+            ) {
+                return Map.of();
+            }
+            @Override
+            public String loadFeedbackSectionMarkdown(String assignmentId,
+                                                     String studentPackage,
+                                                     Path rootPath) {
+                return "> * No feedback provided";
+            }
+            @Override
+            public String buildSourceCodeMarkdown(Assignment assignment,
+                                                  String studentPackage,
+                                                  Path repoPath) {
+                return "// source code";
+            }
+            @Override
+            public String buildCommitHistoryMarkdown(Path repoPath) {
+                return "- commit history";
+            }
+            @Override
+            public String wrapMarkdownAsHtml(String title, String markdown) {
+                return "<html><body>" + title + "</body></html>";
+            }
+        };
+
+        ReportService svc = new ReportService(
+                af,
+                deps,
+                (path, html) -> {
+                    Path parent = path.getParent();
+                    if (parent != null) {
+                        Files.createDirectories(parent);
+                    }
+                    Path staged = Files.createTempFile(parent, "report-stage-", ".tmp");
+                    Files.writeString(staged, html);
+                    throw new java.io.IOException("simulated write failure");
+                }
+        );
+
+        ReportService.ReportGenerationResult result =
+                svc.generateReports(a, root, mappingsPath);
+
+        assertFalse(result.wroteAny());
+        assertTrue(result.hadFailures());
+        assertFalse(result.isSuccess());
+        assertEquals(existingHtml, Files.readString(reportPath));
     }
 }

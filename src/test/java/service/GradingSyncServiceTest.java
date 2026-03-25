@@ -96,7 +96,8 @@ public class GradingSyncServiceTest {
     }
 
     @Test
-    public void preflightPush_allowsOnlyReportFileChange(@TempDir Path tmp) throws Exception {
+    public void preflightPush_allowsWhenBranchAndUpstreamConfigured(@TempDir Path tmp)
+            throws Exception {
         GradingSyncService service = new GradingSyncService();
         Path repoDir = createRepoWithUpstream(tmp);
 
@@ -160,7 +161,7 @@ public class GradingSyncServiceTest {
     }
 
     @Test
-    public void pushAllRepos_nonFastForwardPush_reportsFailedWithPushFailureDetail(
+    public void pushAllRepos_nonFastForwardPush_isRecoveredByPullBeforePush(
             @TempDir Path tmp
     ) throws Exception {
         GradingSyncService service = new GradingSyncService();
@@ -185,10 +186,65 @@ public class GradingSyncServiceTest {
                 "A1"
         );
 
+        assertEquals(1, result.pushed());
+        assertEquals(0, result.skipped());
+        assertEquals(0, result.failed());
+        assertEquals("", result.detailSummary());
+    }
+
+    @Test
+    public void pushAllRepos_unrelatedNonHtmlChange_stillPushesHtmlReport(@TempDir Path tmp)
+            throws Exception {
+        GradingSyncService service = new GradingSyncService();
+        Path repoDir = createRepoWithUpstream(tmp);
+
+        Files.writeString(repoDir.resolve("NOTES.txt"), "do not stage");
+        Files.writeString(repoDir.resolve("A1pkg1.html"), "feedback");
+
+        Map<String, Path> repos = Map.of("pkg1", repoDir);
+
+        GradingSyncService.PushResult result = service.pushAllRepos(
+                List.of("pkg1"),
+                repos::get,
+                "A1"
+        );
+
+        assertEquals(1, result.pushed());
+        assertEquals(0, result.skipped());
+        assertEquals(0, result.failed());
+        assertEquals("", result.detailSummary());
+    }
+
+    @Test
+    public void pushAllRepos_pullFailure_reportsGitPullFailure(@TempDir Path tmp)
+            throws Exception {
+        GradingSyncService service = new GradingSyncService();
+        Path remoteDir = tmp.resolve("remote-pull-fail.git");
+        Path localRepo = createRepoWithUpstream(tmp.resolve("repo-local-pull-fail"), remoteDir);
+        Path divergingClone = tmp.resolve("repo-diverge-pull-fail");
+        cloneRepo(remoteDir, divergingClone);
+        runGit(divergingClone, "checkout", "-B", "main", "origin/main");
+
+        Files.writeString(divergingClone.resolve("README.md"), "remote update");
+        runGit(divergingClone, "add", "README.md");
+        runGit(divergingClone, "commit", "-m", "remote update");
+        runGit(divergingClone, "push", "-u", "origin", "main");
+
+        Files.writeString(localRepo.resolve("README.md"), "local uncommitted change");
+        Files.writeString(localRepo.resolve("A1pkg1.html"), "feedback");
+
+        Map<String, Path> repos = Map.of("pkg1", localRepo);
+
+        GradingSyncService.PushResult result = service.pushAllRepos(
+                List.of("pkg1"),
+                repos::get,
+                "A1"
+        );
+
         assertEquals(0, result.pushed());
         assertEquals(0, result.skipped());
         assertEquals(1, result.failed());
-        assertTrue(result.detailSummary().startsWith("pkg1: git push failed:"));
+        assertTrue(result.detailSummary().startsWith("pkg1: git pull failed:"));
     }
 
     @Test

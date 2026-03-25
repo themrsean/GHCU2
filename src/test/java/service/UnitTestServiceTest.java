@@ -50,7 +50,7 @@ public class UnitTestServiceTest {
         StringBuilder log = new StringBuilder();
         ServiceLogger logger = log::append;
 
-        UnitTestService svc = new UnitTestService(pr, logger);
+        UnitTestService svc = new UnitTestService(pr, logger, new ToolArtifactService(tmp));
 
         // Call buildUnitTestResultMarkdown which should detect no java files under src/
         UnitTestService.UnitTestResult res = svc.buildUnitTestResultMarkdown("username", repo);
@@ -59,5 +59,6 @@ public class UnitTestServiceTest {
         assertTrue(res.markdown().contains("No Java files found under src"));
         assertEquals(0, res.totalTests());
         assertEquals(0, res.failedTests());
+        assertFalse(Files.exists(repo.resolve("build")));
     }
 }

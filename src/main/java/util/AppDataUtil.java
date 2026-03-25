@@ -9,9 +9,26 @@ package util;
 
 import java.nio.file.Path;
 
-public class AppDataUtil {
-    private static Path appDataDir() {
+public final class AppDataUtil {
+
+    private AppDataUtil() {
+        // utility class
+    }
+
+    public static Path appDataDir() {
         String home = System.getProperty("user.home");
+        if (home == null || home.isBlank()) {
+            home = ".";
+        }
+        final String folderName = ".gh-classroom-utils";
+        return Path.of(home).resolve(folderName);
+    }
+
+    public static Path legacyGhcu2AppDataDir() {
+        String home = System.getProperty("user.home");
+        if (home == null || home.isBlank()) {
+            home = ".";
+        }
         String os = System.getProperty("os.name").toLowerCase();
         Path base;
         if (os.contains("mac")) {
@@ -23,6 +40,6 @@ public class AppDataUtil {
         } else {
             base = Path.of(home, ".local", "share");
         }
-        return base.resolve("GHCU2"); // app folder name
+        return base.resolve("GHCU2");
     }
 }

@@ -10,7 +10,9 @@ import service.ReportHtmlWrapper;
 import service.ReportService;
 import service.ServiceLogger;
 import service.SourceCodeService;
+import service.ToolArtifactService;
 import service.UnitTestService;
+import util.AppDataUtil;
 
 import java.nio.file.Path;
 import java.util.Map;
@@ -31,6 +33,7 @@ public class MainWindowReportDependencies implements ReportService.ReportDepende
     private final boolean checkstyleEnabled;
     private final boolean missingCheckstyleRubricItem;
     private final String checkstyleUrl;
+    private final ToolArtifactService toolArtifactService;
 
     public MainWindowReportDependencies(ServiceLogger logger,
                                         MappingService mappingService,
@@ -58,6 +61,7 @@ public class MainWindowReportDependencies implements ReportService.ReportDepende
         this.checkstyleEnabled = checkstyleEnabled;
         this.missingCheckstyleRubricItem = missingCheckstyleRubricItem;
         this.checkstyleUrl = checkstyleUrl;
+        this.toolArtifactService = new ToolArtifactService(AppDataUtil.appDataDir());
     }
 
     @Override
@@ -134,5 +138,10 @@ public class MainWindowReportDependencies implements ReportService.ReportDepende
     @Override
     public String wrapMarkdownAsHtml(String title, String markdown) {
         return reportHtmlWrapper.wrapMarkdownAsHtml(title, markdown);
+    }
+
+    @Override
+    public ToolArtifactService toolArtifactService() {
+        return toolArtifactService;
     }
 }

@@ -202,6 +202,139 @@ public class GradingReportEditorServiceTest {
         assertTrue(updated.contains(">> # Comments"));
     }
 
+    @Test
+    public void normalizeRubricAndSummaryBlocks_doesNotRewriteSourceOrFailedTestSections() {
+        GradingReportEditorService service = new GradingReportEditorService(
+                buildAssignment(),
+                buildAssignmentsFile()
+        );
+
+        String markdown = """
+                # Lab Assignment 7 - Program Stack
+
+                >> | Earned | Possible | Criteria |
+                >> | ------ | -------- | -------- |
+                >> |      8 |       10 | Implementation |
+                >> |      8 |       10 | TOTAL |
+
+                > # Feedback
+                > * Nice work
+
+                ## Source Code
+
+                ```java
+                String box = \"\"\"
+                        |          |
+                        |----------|
+                        +----------+
+                        \"\"\";
+                ```
+
+                ## Failed Unit Tests
+
+                ```
+                expected: <| | |----------| +----------+ > but was: <null>
+                ```
+                """;
+
+        String normalized = service.normalizeRubricAndSummaryBlocks(markdown);
+
+        int rubricIndex = normalized.indexOf("<!-- RUBRIC_TABLE_BEGIN -->");
+        int sourceIndex = normalized.indexOf("## Source Code");
+        int failedIndex = normalized.indexOf("## Failed Unit Tests");
+
+        assertTrue(rubricIndex >= 0);
+        assertTrue(sourceIndex > rubricIndex);
+        assertTrue(failedIndex > sourceIndex);
+        assertTrue(normalized.contains("|----------|"));
+        assertTrue(normalized.contains("expected: <| | |----------| +----------+ > but was: <null>"));
+    }
+
+    @Test
+    public void normalizeRubricAndSummaryBlocks_recoversWhenRawRubricIsMisplacedInBody() {
+        GradingReportEditorService service = new GradingReportEditorService(
+                buildAssignment(),
+                buildAssignmentsFile()
+        );
+
+        String markdown = """
+                # Lab Assignment 7 - Program Stack
+
+                ```java
+                String headerAndFooter =
+                        \"\"\"
+                                |          |
+                                |----------|
+                                +----------+
+                                \"\"\";
+                ```
+
+                >> | Earned | Possible | Criteria |
+                >> | ------ | -------- | -------- |
+                >> |      8 |       10 | Implementation |
+                >> |      8 |       10 | TOTAL |
+
+                ## Source Code
+
+                ### ProgramStack.java
+
+                ```java
+                class ProgramStack {}
+                ```
+                """;
+
+        String normalized = service.normalizeRubricAndSummaryBlocks(markdown);
+
+        int rubricMarker = normalized.indexOf("<!-- RUBRIC_TABLE_BEGIN -->");
+        int sourceHeading = normalized.indexOf("## Source Code");
+        int rawRubricHeader = normalized.indexOf(">> | Earned | Possible | Criteria |");
+
+        assertTrue(rubricMarker >= 0);
+        assertTrue(sourceHeading > rubricMarker);
+        assertTrue(rawRubricHeader > rubricMarker);
+        assertTrue(rawRubricHeader < sourceHeading);
+        assertTrue(normalized.contains("|----------|"));
+    }
+
+    @Test
+    public void normalizeRubricAndSummaryBlocks_isIdempotentForLeadingSpacingNearRubric() {
+        GradingReportEditorService service = new GradingReportEditorService(
+                buildAssignment(),
+                buildAssignmentsFile()
+        );
+
+        String markdown = """
+                # Lab Assignment 7 - Program Stack
+
+
+
+
+                >> | Earned | Possible | Criteria |
+                >> | ------ | -------- | -------- |
+                >> |      8 |       10 | Implementation |
+                >> |      8 |       10 | TOTAL |
+
+                > # Feedback
+                > * Nice work
+
+                ## Source Code
+
+                ```java
+                String box = \"\"\"
+                        |          |
+                        |----------|
+                        +----------+
+                        \"\"\";
+                ```
+                """;
+
+        String once = service.normalizeRubricAndSummaryBlocks(markdown);
+        String twice = service.normalizeRubricAndSummaryBlocks(once);
+        String thrice = service.normalizeRubricAndSummaryBlocks(twice);
+
+        assertEquals(twice, thrice);
+    }
+
     private int countOccurrences(String text, String token) {
         if (text == null || token == null || token.isEmpty()) {
             return 0;

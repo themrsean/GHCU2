@@ -27,31 +27,53 @@ import java.util.List;
 import java.util.Objects;
 import java.util.stream.Stream;
 
+import util.AppDataUtil;
+
 public class UnitTestService {
     private final ProcessRunner processRunner;
     private final ServiceLogger logger;
+    private final ToolArtifactService toolArtifactService;
 
     public UnitTestService(ProcessRunner processRunner,
                            ServiceLogger logger) {
+        this(
+                processRunner,
+                logger,
+                new ToolArtifactService(AppDataUtil.appDataDir())
+        );
+    }
+
+    UnitTestService(ProcessRunner processRunner,
+                    ServiceLogger logger,
+                    ToolArtifactService toolArtifactService) {
         this.processRunner = Objects.requireNonNull(processRunner);
         this.logger = Objects.requireNonNull(logger);
+        this.toolArtifactService = Objects.requireNonNull(toolArtifactService);
     }
 
     public UnitTestResult buildUnitTestResultMarkdown(String studentPackage, Path repoPath)
             throws IOException {
-        UnitTestContext ctx = buildUnitTestContext(studentPackage, repoPath);
-        if (!ctx.isValid()) {
-            return ctx.failureResult();
+        Path runArtifactsRoot = null;
+        try {
+            runArtifactsRoot = toolArtifactService.createRunArtifactsRoot();
+            UnitTestContext ctx = buildUnitTestContext(studentPackage, repoPath, runArtifactsRoot);
+            if (!ctx.isValid()) {
+                return ctx.failureResult();
+            }
+            UnitTestResult compileResult = compileSourceFiles(ctx);
+            if (compileResult != null) {
+                return compileResult;
+            }
+            UnitTestResult testCompileResult = compilePatchedTestSuite(ctx);
+            if (testCompileResult != null) {
+                return testCompileResult;
+            }
+            return runTestsAndBuildResult(ctx);
+        } finally {
+            if (runArtifactsRoot != null) {
+                toolArtifactService.cleanupTree(runArtifactsRoot, logger);
+            }
         }
-        UnitTestResult compileResult = compileSourceFiles(ctx);
-        if (compileResult != null) {
-            return compileResult;
-        }
-        UnitTestResult testCompileResult = compilePatchedTestSuite(ctx);
-        if (testCompileResult != null) {
-            return testCompileResult;
-        }
-        return runTestsAndBuildResult(ctx);
 
     }
 
@@ -165,7 +187,9 @@ public class UnitTestService {
         return s;
     }
 
-    private UnitTestContext buildUnitTestContext(String studentPackage, Path repoPath)
+    private UnitTestContext buildUnitTestContext(String studentPackage,
+                                                 Path repoPath,
+                                                 Path runArtifactsRoot)
             throws IOException {
         UnitTestContext ctx = new UnitTestContext(studentPackage, repoPath);
         Path srcDir = repoPath.resolve("src");
@@ -189,7 +213,11 @@ public class UnitTestService {
             }
         }
         if (ctx.isValid()) {
-            Path buildDir = repoPath.resolve("build");
+            Path repoArtifactsRoot = toolArtifactService.repoArtifactsRoot(
+                    runArtifactsRoot,
+                    repoPath
+            );
+            Path buildDir = repoArtifactsRoot.resolve("build");
             Path classesDir = buildDir.resolve("classes");
 
             ctx.setBuildDir(buildDir);

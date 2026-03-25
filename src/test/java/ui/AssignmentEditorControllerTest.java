@@ -113,7 +113,7 @@ class AssignmentEditorControllerTest {
     }
 
     @Test
-    void init_existingAssignment_normalizesExpectedFilesToBasenamesAndSorts() throws Exception {
+    void init_existingAssignment_preservesExpectedFilePathsAndSorts() throws Exception {
         requireFxRuntime();
         Assignment existing = new Assignment();
         existing.setCourseCode("CSC");
@@ -133,7 +133,10 @@ class AssignmentEditorControllerTest {
 
         List<String> items = runOnFxAndWaitResult(() ->
                 new ArrayList<>(fixture.expectedFilesListView.getItems()));
-        assertEquals(List.of("Foo.java", "View.fxml"), items);
+        assertEquals(
+                List.of("Foo.java", "View.fxml", "src/main/java/Foo.java", "z/View.fxml"),
+                items
+        );
     }
 
     @Test
