@@ -57,6 +57,19 @@ public class GradingWindowControllerTest {
     }
 
     @Test
+    public void resolveMappingFile_prefersFullAssignmentIdOverReportPrefix() throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+
+        setField(controller, "mappingsPath", null);
+        setField(controller, "assignmentId", "CSC1120L7");
+        setField(controller, "reportFilePrefix", "L7");
+
+        Path resolved = (Path) invokeMethod(controller, "resolveMappingFile");
+
+        assertEquals("mappings-CSC1120L7.json", resolved.getFileName().toString());
+    }
+
+    @Test
     public void preflightPush_rejectsDetachedHead(@TempDir Path tmp) throws Exception {
         GradingWindowController controller = new GradingWindowController();
         Path repoDir = createRepoWithCommit(tmp.resolve("repo-detached"));
@@ -874,6 +887,83 @@ public class GradingWindowControllerTest {
         assertTrue(loaded.contains("_No report found for pkg1._"));
         assertTrue(loaded.contains("<!-- RUBRIC_TABLE_BEGIN -->"));
         assertTrue(loaded.contains("<!-- COMMENTS_SUMMARY_BEGIN -->"));
+    }
+
+    @Test
+    public void loadInitialMarkdownForStudent_fallsBackToAlternateAssignmentPrefix(
+            @TempDir Path tmp
+    ) throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+        Path repoDir = tmp.resolve("repo-existing");
+        Files.createDirectories(repoDir);
+        Path mappingFile = tmp.resolve("mappings.json");
+        writeMappingFile(mappingFile, Map.of("pkg1", repoDir.toString()));
+
+        setField(controller, "assignmentId", "CSC1120L7");
+        setField(controller, "reportFilePrefix", "L7");
+        setField(controller, "mappingsPath", mappingFile);
+        setField(controller, "rootPath", tmp);
+        setField(controller, "assignment", buildSingleRubricAssignment());
+        setField(controller, "assignmentsFile", buildSingleRubricAssignmentsFile());
+        setField(
+                controller,
+                "gradingReportEditorService",
+                new GradingReportEditorService(
+                        buildSingleRubricAssignment(),
+                        buildSingleRubricAssignmentsFile()
+                )
+        );
+
+        GradingDraftService draftService = new GradingDraftService(new ReportHtmlWrapper());
+        draftService.saveReportMarkdown("CSC1120L7", "pkg1", repoDir, "# Existing Full Prefix");
+
+        String loaded = (String) invokeMethod(
+                controller,
+                "loadInitialMarkdownForStudent",
+                new Class<?>[] {String.class},
+                "pkg1"
+        );
+
+        assertTrue(loaded.contains("# Existing Full Prefix"));
+    }
+
+    @Test
+    public void loadInitialMarkdownForStudent_fallsBackToProjectFeedbackCopy(@TempDir Path tmp)
+            throws Exception {
+        GradingWindowController controller = new GradingWindowController();
+        Path repoDir = tmp.resolve("repo-existing");
+        Files.createDirectories(repoDir);
+        Path mappingFile = tmp.resolve("mappings.json");
+        writeMappingFile(mappingFile, Map.of("pkg1", repoDir.toString()));
+
+        setField(controller, "assignmentId", "A1");
+        setField(controller, "mappingsPath", mappingFile);
+        setField(controller, "rootPath", tmp);
+        setField(controller, "assignment", buildSingleRubricAssignment());
+        setField(controller, "assignmentsFile", buildSingleRubricAssignmentsFile());
+        setField(
+                controller,
+                "gradingReportEditorService",
+                new GradingReportEditorService(
+                        buildSingleRubricAssignment(),
+                        buildSingleRubricAssignmentsFile()
+                )
+        );
+
+        Path feedbackDir = tmp.resolve("feedback");
+        Files.createDirectories(feedbackDir);
+        String markdown = "# Existing Feedback Copy";
+        String html = new ReportHtmlWrapper().wrapMarkdownAsHtml("pkg1", markdown);
+        Files.writeString(feedbackDir.resolve("A1pkg1.html"), html);
+
+        String loaded = (String) invokeMethod(
+                controller,
+                "loadInitialMarkdownForStudent",
+                new Class<?>[] {String.class},
+                "pkg1"
+        );
+
+        assertTrue(loaded.contains("# Existing Feedback Copy"));
     }
 
     @Test

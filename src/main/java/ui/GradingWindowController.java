@@ -638,12 +638,8 @@ public class GradingWindowController {
         Path repoDir = findRepoDirForStudentPackage(studentPackage);
 
         if (repoDir != null) {
-            GradingDraftService.LoadReportResult loadResult = gradingDraftService
-                    .loadReportMarkdownResult(
-                    effectiveReportFilePrefix(),
-                    studentPackage,
-                    repoDir
-            );
+            GradingDraftService.LoadReportResult loadResult =
+                    loadExistingReportWithFallbacks(studentPackage, repoDir);
             if (!loadResult.readOk()) {
                 reportLoadFailureStudents.add(studentPackage);
                 String message = loadResult.message();
@@ -663,6 +659,48 @@ public class GradingWindowController {
         }
 
         return buildFreshReportSkeleton(studentPackage);
+    }
+
+    private GradingDraftService.LoadReportResult loadExistingReportWithFallbacks(
+            String studentPackage,
+            Path repoDir
+    ) {
+        String primaryPrefix = effectiveReportFilePrefix();
+        String alternatePrefix = assignmentId == null ? "" : assignmentId;
+
+        List<String> prefixes = new ArrayList<>();
+        if (primaryPrefix != null && !primaryPrefix.isBlank()) {
+            prefixes.add(primaryPrefix);
+        }
+        if (alternatePrefix != null
+                && !alternatePrefix.isBlank()
+                && !alternatePrefix.equals(primaryPrefix)) {
+            prefixes.add(alternatePrefix);
+        }
+
+        List<Path> roots = new ArrayList<>();
+        roots.add(repoDir);
+        roots.add(repoDir.resolve("feedback"));
+        if (rootPath != null) {
+            roots.add(rootPath.resolve("feedback"));
+        }
+
+        GradingDraftService.LoadReportResult finalMiss =
+                new GradingDraftService.LoadReportResult(true, false, "", "");
+        for (String prefix : prefixes) {
+            for (Path candidateRoot : roots) {
+                GradingDraftService.LoadReportResult result = gradingDraftService
+                        .loadReportMarkdownResult(prefix, studentPackage, candidateRoot);
+                if (!result.readOk()) {
+                    return result;
+                }
+                if (result.reportExists()) {
+                    return result;
+                }
+                finalMiss = result;
+            }
+        }
+        return finalMiss;
     }
 
     private String buildFreshReportSkeleton(String studentPackage) {
@@ -1346,13 +1384,21 @@ public class GradingWindowController {
     }
 
     private Path findRepoDirForStudentPackage(String studentPackage) {
-        return gradingMappingsService.findRepoDirForStudentPackage(
-                studentPackage,
-                mappingsPath,
-                effectiveReportFilePrefix(),
-                rootPath,
-                appDataDir()
-        );
+        if (studentPackage == null || studentPackage.isBlank()) {
+            return null;
+        }
+
+        Map<String, String> mapping = loadMappingsForUse();
+        String repoPath = mapping.get(studentPackage);
+        if (repoPath == null || repoPath.isBlank()) {
+            return null;
+        }
+
+        Path repoDir = Path.of(repoPath);
+        if (!Files.isDirectory(repoDir)) {
+            return null;
+        }
+        return repoDir;
     }
 
     private String wrapMarkdownAsHtml(String title, String markdown) {
@@ -2083,9 +2129,29 @@ public class GradingWindowController {
     }
 
     private Map<String, String> loadMappingsForUse() {
+        Map<String, String> primary = gradingMappingsService.loadMappingsForUse(
+                mappingsPath,
+                effectiveMappingAssignmentId(),
+                rootPath,
+                appDataDir()
+        );
+
+        if (!primary.isEmpty()) {
+            return primary;
+        }
+
+        String fallbackPrefix = effectiveReportFilePrefix();
+        String mappingId = effectiveMappingAssignmentId();
+        boolean shouldFallback = fallbackPrefix != null
+                && !fallbackPrefix.isBlank()
+                && !fallbackPrefix.equals(mappingId);
+        if (!shouldFallback) {
+            return primary;
+        }
+
         return gradingMappingsService.loadMappingsForUse(
                 mappingsPath,
-                effectiveReportFilePrefix(),
+                fallbackPrefix,
                 rootPath,
                 appDataDir()
         );
@@ -2094,9 +2160,16 @@ public class GradingWindowController {
     private Path resolveMappingFile() {
         return gradingMappingsService.resolveMappingFile(
                 mappingsPath,
-                effectiveReportFilePrefix(),
+                effectiveMappingAssignmentId(),
                 appDataDir()
         );
+    }
+
+    private String effectiveMappingAssignmentId() {
+        if (assignmentId != null && !assignmentId.isBlank()) {
+            return assignmentId;
+        }
+        return effectiveReportFilePrefix();
     }
 
     @FunctionalInterface
